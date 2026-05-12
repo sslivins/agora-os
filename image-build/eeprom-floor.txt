@@ -1,8 +1,25 @@
-# Pinned Pi 5 EEPROM bootloader firmware commit.
+# Pinned Pi 5 EEPROM bootloader firmware floor.
 #
-# Filled in by p0-eeprom-template once we pick a floor version. Format:
-# one line, the upstream `rpi-eeprom` commit hash. Used at build time by
-#   rpi-eeprom-update -d -a -f /lib/firmware/raspberrypi/bootloader-2712/<this>.bin
-# and at firstboot to ensure the field device's EEPROM is >= this version.
+# Format: one bare unix timestamp (the value printed by
+#   vcgencmd bootloader_version | awk '/^timestamp /{print $2}'
+# on the floor-target firmware). Lines starting with # and blank lines
+# are ignored. Read at firstboot by /usr/local/sbin/agora-firstboot
+# step 2b — if the device's current bootloader timestamp is less than
+# this value, firstboot stages an rpi-eeprom-update (applied on the
+# next power-cycle, F14).
+#
+# Until p0-acceptance verification on the oldest stockroom Pi 5 (F16),
+# this stays a TODO placeholder. The firstboot script recognizes any
+# token starting with "TODO" and skips the floor check, so the device
+# boots fine. To pin a real floor:
+#
+#   1. Boot the oldest stockroom Pi 5 with this image.
+#   2. Run: vcgencmd bootloader_version | awk '/^timestamp /{print $2}'
+#   3. Replace the placeholder below with that value.
+#   4. Rebuild the image.
+#
+# Note: the companion file eeprom-config.template is applied
+# unconditionally at firstboot (it's idempotent — the script only
+# `--apply`s if a value actually differs from the running config).
 
 TODO-pin-after-testing-on-stockroom-Pi

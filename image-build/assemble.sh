@@ -182,9 +182,19 @@ EOF
         ln -sf /etc/systemd/system/agora-firstboot.service \
             "${R}/etc/systemd/system/local-fs.target.wants/agora-firstboot.service"
 
-        # TODO(p0-eeprom-template): drop the eeprom-config and eeprom-floor
-        # files into /boot/firmware/ (they're consumed by step 2 of
-        # /usr/local/sbin/agora-firstboot).
+    done
+
+    # EEPROM artifacts go into /boot/firmware/ (the BOOT partitions, not the
+    # rootfs slots) because that's where rpi-eeprom-update / rpi-eeprom-config
+    # look for staged updates. Per F6 we keep boot-A and boot-B byte-identical
+    # so both slots get the same files. Consumed by step 2 of
+    # /usr/local/sbin/agora-firstboot on the device. (p0-eeprom-template, F9)
+    for boot in boot-A boot-B; do
+        local B="${WORK}/mnt/${boot}"
+        install -m 0644 "${HERE}/eeprom-config.template" \
+            "${B}/agora-eeprom-config.txt"
+        install -m 0644 "${HERE}/eeprom-floor.txt" \
+            "${B}/agora-eeprom-floor.txt"
     done
 }
 

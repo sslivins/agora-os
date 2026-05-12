@@ -80,38 +80,106 @@ step_resize_data() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2: apply pinned EEPROM floor (F9, F14).
+# Step 2: apply pinned EEPROM config + firmware floor (F9, F14).
 #
-# The floor file (/boot/firmware/agora-eeprom-floor.txt) is written by
-# the p0-eeprom-template todo. Until that todo lands, this step is a
-# logged no-op. Once it lands, we compare current bootloader version
-# against the floor and stage an rpi-eeprom-update only if current < floor.
+# Two halves, both idempotent (no sentinel needed):
 #
-# F14 caveat: rpi-eeprom-update stages the update for the NEXT power-cycle.
-# A soft reboot will not pick it up. Acceptance testing must power-cycle.
+#   (a) Config: compare desired values from /boot/firmware/agora-eeprom-config.txt
+#       (BOOT_ORDER, NET_INSTALL_AT_POWER_ON, BOOT_UART, ...) against the
+#       running EEPROM config via `rpi-eeprom-config`. If any value differs,
+#       run `rpi-eeprom-config --apply` to stage the change. Closes agora#165.
+#
+#   (b) Firmware floor: compare current bootloader timestamp (from
+#       `vcgencmd bootloader_version`) against the floor value in
+#       /boot/firmware/agora-eeprom-floor.txt. Run `rpi-eeprom-update -a` only
+#       if current < floor.
+#
+# F14 caveat: BOTH operations stage updates for the NEXT power-cycle. A soft
+# reboot will not pick them up. Acceptance testing (p0-acceptance) must
+# explicitly power-cycle after firstboot to verify.
 # ---------------------------------------------------------------------------
 step_eeprom_floor() {
+    step_eeprom_config
+    step_eeprom_floor_only
+}
+
+# Step 2a: EEPROM config (BOOT_ORDER, NET_INSTALL_AT_POWER_ON, BOOT_UART).
+step_eeprom_config() {
+    local config_file="/boot/firmware/agora-eeprom-config.txt"
+
+    if [[ ! -f "$config_file" ]]; then
+        log "step 2a: no EEPROM config at ${config_file}; skipping"
+        return 0
+    fi
+    if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
+        warn "step 2a: rpi-eeprom-config not present; skipping config apply"
+        return 0
+    fi
+
+    # Extract KEY=VALUE pairs from our config (strip comments + blanks).
+    local desired
+    desired=$(grep -vE '^\s*(#|$)' "$config_file" | grep '=' || true)
+    if [[ -z "$desired" ]]; then
+        warn "step 2a: no KEY=VALUE entries in ${config_file}; skipping"
+        return 0
+    fi
+
+    # Get current EEPROM config. `rpi-eeprom-config` (no args) prints the
+    # currently-staged or currently-installed config to stdout.
+    local current needs_apply=0
+    current=$(rpi-eeprom-config 2>/dev/null || true)
+
+    local key val current_val
+    while IFS= read -r line; do
+        key="${line%%=*}"
+        val="${line#*=}"
+        # Trim whitespace.
+        key="${key// /}"
+        val="${val// /}"
+        current_val=$(echo "$current" | awk -F= -v k="$key" '$1==k {print $2; exit}')
+        current_val="${current_val// /}"
+        if [[ "$current_val" != "$val" ]]; then
+            log "step 2a: EEPROM config ${key} differs (current='${current_val}', desired='${val}')"
+            needs_apply=1
+        fi
+    done <<<"$desired"
+
+    if (( needs_apply == 0 )); then
+        log "step 2a: EEPROM config already matches; no apply needed"
+        return 0
+    fi
+
+    log "step 2a: applying EEPROM config from ${config_file}"
+    log "step 2a: NOTE — takes effect on next POWER-CYCLE, not soft-reboot (F14)"
+    if ! rpi-eeprom-config --apply "$config_file"; then
+        err "step 2a: rpi-eeprom-config --apply failed; continuing"
+        return 0
+    fi
+}
+
+# Step 2b: pinned bootloader firmware floor.
+step_eeprom_floor_only() {
     local floor_file="/boot/firmware/agora-eeprom-floor.txt"
     local floor_ver current_ver
 
     if [[ ! -f "$floor_file" ]]; then
-        log "step 2: no EEPROM floor file at ${floor_file} (will land in p0-eeprom-template); skipping"
+        log "step 2b: no EEPROM floor file at ${floor_file}; skipping"
         return 0
     fi
 
     # Strip comments + blank lines; take the first remaining token.
     floor_ver=$(grep -vE '^\s*(#|$)' "$floor_file" | head -n1 | awk '{print $1}')
     if [[ -z "$floor_ver" || "$floor_ver" == TODO* ]]; then
-        log "step 2: EEPROM floor is still a placeholder; skipping"
+        log "step 2b: EEPROM floor is still a placeholder; skipping"
         return 0
     fi
 
     if ! command -v vcgencmd >/dev/null 2>&1; then
-        warn "step 2: vcgencmd not present; skipping EEPROM check"
+        warn "step 2b: vcgencmd not present; skipping floor check"
         return 0
     fi
     if ! command -v rpi-eeprom-update >/dev/null 2>&1; then
-        warn "step 2: rpi-eeprom-update not present; skipping EEPROM update"
+        warn "step 2b: rpi-eeprom-update not present; skipping floor enforcement"
         return 0
     fi
 
@@ -123,19 +191,19 @@ step_eeprom_floor() {
     current_ver=$(vcgencmd bootloader_version 2>/dev/null \
         | awk '/^timestamp /{print $2}' | head -n1)
     if [[ -z "$current_ver" ]]; then
-        warn "step 2: could not parse current EEPROM timestamp; skipping"
+        warn "step 2b: could not parse current EEPROM timestamp; skipping"
         return 0
     fi
 
     if (( current_ver < floor_ver )); then
-        log "step 2: EEPROM current=${current_ver} < floor=${floor_ver}; staging update"
-        log "step 2: NOTE — update takes effect on next POWER-CYCLE, not soft-reboot (F14)"
+        log "step 2b: EEPROM current=${current_ver} < floor=${floor_ver}; staging update"
+        log "step 2b: NOTE — update takes effect on next POWER-CYCLE, not soft-reboot (F14)"
         if ! rpi-eeprom-update -d -a; then
-            err "step 2: rpi-eeprom-update failed; continuing"
+            err "step 2b: rpi-eeprom-update failed; continuing"
             return 0
         fi
     else
-        log "step 2: EEPROM current=${current_ver} >= floor=${floor_ver}; no update needed"
+        log "step 2b: EEPROM current=${current_ver} >= floor=${floor_ver}; no update needed"
     fi
 }
 
