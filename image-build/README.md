@@ -31,13 +31,13 @@ sudo apt-get update
 sudo apt-get install -y \
     build-essential debootstrap qemu-user-static \
     coreutils util-linux dosfstools e2fsprogs gdisk parted \
-    zstd minisign rsync ca-certificates curl git \
+    xz-utils minisign rsync ca-certificates curl git \
     rpi-eeprom
 ```
 
 Free disk on the build host: **at least 20 GB**. The assembled image is
 ~17 GB pre-compression (5 partitions: 512 + 512 + 8192 + 8192 + 1024 MB
-per D52) before zstd brings it down to ~5–6 GB. The intermediate pi-gen
+per D52) before xz brings it down to ~1–2 GB. The intermediate pi-gen
 build directory adds another ~6 GB.
 
 Required to flash to a real Pi 5 for the stockroom smoke-test (§5):
@@ -95,16 +95,16 @@ sudo umount /tmp/boot /tmp/root
 sudo losetup -d "$LOOP"
 
 # 6. Assemble the 5-partition image.
-sudo ./image-build/assemble.sh out/rootfs.tar out/boot.tar dist/agora-os-dev.img.zst
+sudo ./image-build/assemble.sh out/rootfs.tar out/boot.tar dist/agora-os-dev.img.xz
 
 # 7. (Optional) Sign locally for testing. NEVER commit the .key file.
 #    Use a throwaway dev key, not your production keypair.
 minisign -S -W -s ~/agora-dev.key -t "agora-os dev local build" \
-    -m dist/agora-os-dev.img.zst
+    -m dist/agora-os-dev.img.xz
 ```
 
-The output `agora-os-dev.img.zst` can be flashed with `rpi-imager`,
-`dd`, or `gnome-disks` — anything that handles zstd-compressed
+The output `agora-os-dev.img.xz` can be flashed with `rpi-imager`,
+`dd`, or `gnome-disks` — anything that handles xz-compressed
 filesystem images. Target a 32 GB+ SD card.
 
 For the **release** path (tag-driven CI build), skip all of this — just
@@ -126,9 +126,9 @@ That triggers `.github/workflows/release.yml`. The job:
 1. Clones pi-gen at the pinned SHA.
 2. Stages the overlay (same as §2 steps 2–4).
 3. Builds, splits, assembles (same as §2 steps 5–6).
-4. Signs `agora-os-<tag>.img.zst` with `minisign` using `MINISIGN_SECRET`
+4. Signs `agora-os-<tag>.img.xz` with `minisign` using `MINISIGN_SECRET`
    (the GitHub Actions secret, see §4).
-5. Drafts a GitHub Release with `.img.zst` + `.minisig` + `.sha256`
+5. Drafts a GitHub Release with `.img.xz` + `.minisig` + `.sha256`
    attached.
 
 After the workflow finishes, edit the draft release notes, then publish.
@@ -269,7 +269,7 @@ Full ceremony:
    # Run from the live USB session, key still in memory.
    minisign -S -W -s agora-os-recovery.key \
        -t "agora-os recovery-cut <tag> — primary key rotation" \
-       -m agora-os-<tag>.img.zst
+       -m agora-os-<tag>.img.xz
    ```
 
    Bake the new primary pubkey into this image. On-device verifiers
@@ -308,7 +308,7 @@ Checklist for each new tagged image:
    haven't received recent OTA EEPROM updates.
 2. Fully wipe a 32 GB+ SD card (zero the first 8 MB to clear any prior
    GPT: `sudo dd if=/dev/zero of=/dev/sdX bs=1M count=8 conv=fsync`).
-3. Flash `agora-os-<tag>.img.zst` (from the draft GitHub Release) to
+3. Flash `agora-os-<tag>.img.xz` (from the draft GitHub Release) to
    the card.
 4. Insert into the stockroom Pi, **power-cycle** (cold boot, not soft
    reboot — EEPROM updates apply only on power-cycle, F14).
@@ -464,7 +464,7 @@ When cutting an `agora-os` release that bumps `agora_app_floor`:
 
 | File | Purpose |
 |---|---|
-| `assemble.sh` | The 5-partition GPT image assembler (D55). Reads `rootfs.tar` + `boot.tar`, produces a signed-elsewhere `.img.zst`. |
+| `assemble.sh` | The 5-partition GPT image assembler (D55). Reads `rootfs.tar` + `boot.tar`, produces a signed-elsewhere `.img.xz`. |
 | `eeprom-floor.txt` | Bootloader-timestamp floor (Unix epoch). Pinned per major release per §6. |
 | `eeprom-config.template` | The `BOOT_ORDER` / `NET_INSTALL_AT_POWER_ON` / `BOOT_UART` config baked into both `boot-A` and `boot-B` (F6 mirror) and re-applied by firstboot if drifted (D54 / F9 two-operation bring-up). |
 | `firstboot/agora-firstboot.sh` | On-device firstboot orchestrator (idempotent per F5). Resizes `/data`, applies EEPROM floor, generates `/etc/machine-id` + SSH host keys (F11), starts `systemd-timesyncd` (F20). |

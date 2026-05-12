@@ -16,7 +16,7 @@ plugging in a USB stick that has a working `agora-os` image flashed onto it.
 
 ## Recovery procedure
 
-1. On a known-good workstation, flash a working `agora-os-vX.Y.Z.img.zst`
+1. On a known-good workstation, flash a working `agora-os-vX.Y.Z.img.xz`
    onto a USB stick using `rpi-imager` or `dd`.
 2. Power the field Pi 5 off.
 3. Plug the USB stick into one of the Pi 5's USB-3 ports.
@@ -24,7 +24,7 @@ plugging in a USB stick that has a working `agora-os` image flashed onto it.
 5. The bootloader fails to read the corrupt SD, falls through to the USB
    stick, and boots into a clean rootfs.
 6. From the USB-booted system, reflash the SD card in place (e.g.
-   `zstd -d <recovery.img.zst> -c | dd of=/dev/mmcblk0 bs=4M conv=fsync`).
+   `xz -dc <recovery.img.xz> | dd of=/dev/mmcblk0 bs=4M conv=fsync`).
 7. Power off, remove the USB stick, power on. Device boots from a fresh
    SD with no on-site SD swap required.
 

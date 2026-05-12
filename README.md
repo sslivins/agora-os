@@ -30,7 +30,7 @@ auto-expands to fill the rest on first boot.
 ```
 .
 ├── image-build/                # build scripts and templates
-│   ├── assemble.sh             # main assembler: pi-gen tarballs → .img.zst
+│   ├── assemble.sh             # main assembler: pi-gen tarballs → .img.xz
 │   ├── partition.sh            # sgdisk helper for the 5-part GPT
 │   ├── autoboot.txt            # tryboot config — same file on both boot parts (F6)
 │   ├── cmdline-A.txt           # boot-A cmdline (PARTLABEL=root-A)
@@ -64,14 +64,15 @@ boot tarball. `image-build/assemble.sh` then:
 7. Bakes both signing pubkeys: `/etc/agora/update-pubkey.pem` (primary) and
    `/etc/agora/update-pubkey-recovery.pem` (recovery) per D54.
 8. Seeds `/data/SCHEMA_VERSION=1` and creates `/data/var-log/`.
-9. zstd-compresses the result into `.img.zst` (F19 — matches OTA bundle
-   compression in Phase 2).
+9. xz-compresses the result into `.img.xz` (F19 superseded — image uses xz
+   for Pi Imager / balenaEtcher progress-bar accuracy; OTA bundles in
+   Phase 2 stay on zstd for fast on-Pi decompression, D17 unchanged).
 
 ## Building
 
 Tagged releases are built automatically by GitHub Actions
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) — push a
-`v*` tag and a signed `.img.zst` + `.minisig` is attached to a draft release.
+`v*` tag and a signed `.img.xz` + `.minisig` is attached to a draft release.
 
 For local builds, signing-key custody, branch protection, stockroom-Pi
 smoke-tests, and the floor-pinning procedure, see

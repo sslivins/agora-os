@@ -2,10 +2,10 @@
 # assemble.sh — bolt-on assembler stage (D55).
 #
 # Takes the rootfs + boot tarballs emitted by stock pi-gen and produces a
-# flashable 5-partition GPT .img.zst per the Phase 0 design.
+# flashable 5-partition GPT .img.xz per the Phase 0 design.
 #
 # Usage:
-#   assemble.sh <rootfs-tar> <boot-tar> <out-img-zst>
+#   assemble.sh <rootfs-tar> <boot-tar> <out-img-xz>
 #
 # Inputs are expected to be the standard pi-gen "export-image" stage output,
 # unmodified.
@@ -16,9 +16,9 @@
 
 set -euo pipefail
 
-ROOTFS_TAR="${1:?usage: assemble.sh <rootfs-tar> <boot-tar> <out-img-zst>}"
-BOOT_TAR="${2:?usage: assemble.sh <rootfs-tar> <boot-tar> <out-img-zst>}"
-OUT_IMG_ZST="${3:?usage: assemble.sh <rootfs-tar> <boot-tar> <out-img-zst>}"
+ROOTFS_TAR="${1:?usage: assemble.sh <rootfs-tar> <boot-tar> <out-img-xz>}"
+BOOT_TAR="${2:?usage: assemble.sh <rootfs-tar> <boot-tar> <out-img-xz>}"
+OUT_IMG_XZ="${3:?usage: assemble.sh <rootfs-tar> <boot-tar> <out-img-xz>}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$(mktemp -d -t agora-os-build.XXXXXX)"
@@ -222,11 +222,16 @@ finalize_image() {
     losetup -d "$LOOPDEV"
     LOOPDEV=""
 
-    mkdir -p "$(dirname "$OUT_IMG_ZST")"
-    # F19: zstd-compress, not xz. Matches OTA bundle compression in Phase 2
-    # and is dramatically faster in CI.
-    zstd -T0 -19 -f "$IMG" -o "$OUT_IMG_ZST"
-    echo "wrote ${OUT_IMG_ZST}"
+    mkdir -p "$(dirname "$OUT_IMG_XZ")"
+    # F19 (superseded): the flashable image uses xz, not zstd.
+    # Pi Imager + balenaEtcher both read the uncompressed size from the xz
+    # footer to render an accurate progress bar; zstd's frame header doesn't
+    # expose that reliably so the progress bar overshoots 1000%+. -T0 uses
+    # every core, which keeps compress time within ~2x of single-thread zstd
+    # on the arm runner. OTA bundles (Phase 2) stay on zstd for fast on-Pi
+    # decompression — that's a different trade-off (D17 unchanged).
+    xz -T0 -9 -f -c "$IMG" > "$OUT_IMG_XZ"
+    echo "wrote ${OUT_IMG_XZ}"
 }
 
 main() {

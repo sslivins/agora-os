@@ -12,7 +12,7 @@ of that plan one-for-one.
 ## Prerequisites
 
 - A tagged `agora-os` release. The release workflow has produced
-  `agora-os-<tag>.img.zst` + `<tag>.img.zst.minisig` + `<tag>.img.zst.sha256`
+  `agora-os-<tag>.img.xz` + `<tag>.img.xz.minisig` + `<tag>.img.xz.sha256`
   on the GitHub Release.
 - A **32 GB or larger** SD card (D52 — the 5-partition layout occupies
   ~17 GB before `/data` is expanded).
@@ -45,9 +45,9 @@ The CI workflow `.github/workflows/release.yml` runs to completion on
 push of the release tag, on the `ubuntu-24.04-arm` runner (D55, no
 qemu). The GitHub Release for the tag contains three attachments:
 
-- `agora-os-<tag>.img.zst`
-- `agora-os-<tag>.img.zst.minisig`
-- `agora-os-<tag>.img.zst.sha256`
+- `agora-os-<tag>.img.xz`
+- `agora-os-<tag>.img.xz.minisig`
+- `agora-os-<tag>.img.xz.sha256`
 
 The release is created in **draft** state — that's fine; the
 acceptance run takes it out of draft only after the checks pass.
@@ -58,15 +58,15 @@ On a build machine (or any Linux box with `minisign` installed):
 
 ```sh
 minisign -V -P "$(cat image-build/update-pubkey.pem)" \
-    -m agora-os-<tag>.img.zst \
-    -x agora-os-<tag>.img.zst.minisig
+    -m agora-os-<tag>.img.xz \
+    -x agora-os-<tag>.img.xz.minisig
 ```
 
 Output must end with `Signature and comment signature verified`.
 Also verify the SHA256:
 
 ```sh
-sha256sum -c agora-os-<tag>.img.zst.sha256
+sha256sum -c agora-os-<tag>.img.xz.sha256
 ```
 
 ### A3. Power-cycle (not soft reboot) into healthy slot A (F14)
@@ -355,7 +355,7 @@ Pi 5 serial: `<serial>` (oldest in stockroom: yes/no)
 SD card size: <e.g. 32 GB>
 EEPROM floor: `<value from eeprom-floor.txt>`
 
-✅ A1  Release artifact present (`.img.zst` + `.minisig` + `.sha256`)
+✅ A1  Release artifact present (`.img.xz` + `.minisig` + `.sha256`)
 ✅ A2  Signature verifies against primary pubkey
 ✅ A3  Cold-boot into healthy slot A
 ✅ A4  Firstboot ran every step

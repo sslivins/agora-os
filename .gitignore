@@ -3,7 +3,7 @@ dist/
 out/
 work/
 *.img
-*.img.zst
+*.img.xz
 *.img.xz
 *.sig
 

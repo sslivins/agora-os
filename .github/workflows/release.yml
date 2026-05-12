@@ -9,8 +9,8 @@
 #   4. Split pi-gen's output .img into boot + rootfs tarballs.
 #   5. Run image-build/assemble.sh to lay out the 5-partition GPT image
 #      with both root slots, EEPROM templates, and dual pubkeys.
-#   6. Sign agora-os-*.img.zst with minisign using MINISIGN_SECRET.
-#   7. Attach .img.zst + .minisig to a draft GitHub Release.
+#   6. Sign agora-os-*.img.xz with minisign using MINISIGN_SECRET.
+#   7. Attach .img.xz + .minisig to a draft GitHub Release.
 #
 # This pipeline borrows its pi-gen prelude from sslivins/agora's mature
 # build-image.yml: native arm64 runner (no qemu cross-build), build-docker.sh
@@ -76,7 +76,7 @@ jobs:
           set -eux
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gdisk dosfstools e2fsprogs zstd minisign rpi-eeprom
+            gdisk dosfstools e2fsprogs xz-utils minisign rpi-eeprom
 
       - name: Clone pi-gen at pinned SHA
         run: |
@@ -207,17 +207,17 @@ jobs:
           # .sh files into the index. Force +x so 'command not found' cannot
           # masquerade as a real assemble failure.
           chmod +x image-build/*.sh image-build/firstboot/*.sh
-          OUT_IMG_ZST="/tmp/agora-build/agora-os-${GITHUB_REF_NAME:-dev}.img.zst"
+          OUT_IMG_XZ="/tmp/agora-build/agora-os-${GITHUB_REF_NAME:-dev}.img.xz"
           sudo image-build/assemble.sh \
             /tmp/agora-build/rootfs.tar \
             /tmp/agora-build/boot.tar \
-            "$OUT_IMG_ZST"
-          # assemble.sh runs as root, so /tmp/agora-build/ + the new .img.zst
+            "$OUT_IMG_XZ"
+          # assemble.sh runs as root, so /tmp/agora-build/ + the new .img.xz
           # are owned by root. Hand the directory back to the runner user so
           # the (unprivileged) minisign step can write the sibling .minisig.
           sudo chown -R "$(id -u):$(id -g)" /tmp/agora-build
           sudo ls -la /tmp/agora-build/
-          echo "OUT_IMG_ZST=${OUT_IMG_ZST}" >> "$GITHUB_ENV"
+          echo "OUT_IMG_XZ=${OUT_IMG_XZ}" >> "$GITHUB_ENV"
 
       - name: Sign image with minisign
         # MINISIGN_SECRET is the full contents of the minisign .key file
@@ -242,15 +242,15 @@ jobs:
           minisign -S -W \
             -s "$KEYFILE" \
             -t "agora-os ${TAG} built by GH Actions on $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -m "$OUT_IMG_ZST"
+            -m "$OUT_IMG_XZ"
           shred -u "$KEYFILE" || rm -f "$KEYFILE"
-          sudo ls -la "$(dirname "$OUT_IMG_ZST")"
+          sudo ls -la "$(dirname "$OUT_IMG_XZ")"
 
       - name: Compute checksums
         run: |
           set -eux
-          cd "$(dirname "$OUT_IMG_ZST")"
-          sha256sum "$(basename "$OUT_IMG_ZST")" > "$(basename "$OUT_IMG_ZST").sha256"
+          cd "$(dirname "$OUT_IMG_XZ")"
+          sha256sum "$(basename "$OUT_IMG_XZ")" > "$(basename "$OUT_IMG_XZ").sha256"
 
       - name: Create draft release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -259,6 +259,6 @@ jobs:
           draft: true
           generate_release_notes: true
           files: |
-            /tmp/agora-build/agora-os-*.img.zst
-            /tmp/agora-build/agora-os-*.img.zst.minisig
-            /tmp/agora-build/agora-os-*.img.zst.sha256
+            /tmp/agora-build/agora-os-*.img.xz
+            /tmp/agora-build/agora-os-*.img.xz.minisig
+            /tmp/agora-build/agora-os-*.img.xz.sha256
