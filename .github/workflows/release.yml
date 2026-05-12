@@ -203,6 +203,10 @@ jobs:
       - name: Assemble 5-partition agora-os image
         run: |
           set -eux
+          # Defensive: a Windows-authored repo can re-introduce non-executable
+          # .sh files into the index. Force +x so 'command not found' cannot
+          # masquerade as a real assemble failure.
+          chmod +x image-build/*.sh image-build/firstboot/*.sh
           OUT_IMG_ZST="/tmp/agora-build/agora-os-${GITHUB_REF_NAME:-dev}.img.zst"
           sudo image-build/assemble.sh \
             /tmp/agora-build/rootfs.tar \
