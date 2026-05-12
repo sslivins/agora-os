@@ -69,12 +69,13 @@ boot tarball. `image-build/assemble.sh` then:
 
 ## Building
 
-```sh
-# TODO: filled in by p0-image-build-readme — full prereqs, signing-key
-# custody runbook (primary + recovery per D54), and the stockroom-Pi
-# smoke-test ritual (F16).
-sudo ./image-build/assemble.sh out/rootfs.tar.zst out/boot.tar.zst dist/agora-os-v0.1.0.img.zst
-```
+Tagged releases are built automatically by GitHub Actions
+([`.github/workflows/release.yml`](.github/workflows/release.yml)) — push a
+`v*` tag and a signed `.img.zst` + `.minisig` is attached to a draft release.
+
+For local builds, signing-key custody, branch protection, stockroom-Pi
+smoke-tests, and the floor-pinning procedure, see
+[`image-build/README.md`](image-build/README.md).
 
 ## Compatibility
 
