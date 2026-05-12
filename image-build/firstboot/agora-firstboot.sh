@@ -136,10 +136,28 @@ step_layout_expand() {
 
     # Grow root-A (P2) from 3 GB to 8 GB. Partition 2 starts at 513 MiB
     # (1 MiB GPT start + 512 MiB boot-A); end = 513 + 8192 = 8705 MiB.
-    # parted -f / --fix forces it to accept the resize on a mounted partition.
-    log "step 1: parted resizepart 2 to 8705MiB (root-A 3GB -> 8GB)"
-    if ! parted -s -f "$diskdev" resizepart 2 8705MiB; then
-        err "step 1: parted resizepart 2 failed; aborting expand"
+    #
+    # We use sgdisk (delete + recreate at same start sector) instead of
+    # parted because parted refuses to resize a mounted partition: even
+    # with `-s -f` it treats the "Partition is being used" warning as
+    # PED_EXCEPTION_CANCEL in script mode and aborts (observed on
+    # Debian trixie / parted 3.6). sgdisk only modifies the on-disk
+    # GPT and doesn't care about kernel mount state; we then call
+    # partx -u --nr 2 to push the new size into the kernel via
+    # BLKPG_RESIZE_PARTITION (no unmount required).
+    local p2_start
+    p2_start=$(lsblk -no START "$root_dev" 2>/dev/null | tr -d ' \n')
+    if [[ -z "$p2_start" ]]; then
+        err "step 1: could not determine P2 start sector via lsblk; aborting expand"
+        return 0
+    fi
+    log "step 1: sgdisk resizing P2 (root-A) to 8 GiB (start sector ${p2_start})"
+    if ! sgdisk --delete=2 \
+                --new=2:"${p2_start}":+8192MiB \
+                --change-name=2:root-A \
+                --typecode=2:0700 \
+                "$diskdev"; then
+        err "step 1: sgdisk resize of P2 failed; aborting expand"
         return 0
     fi
     # partx -u --nr 2 issues BLKPG_RESIZE_PARTITION which works on the busy
