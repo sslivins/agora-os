@@ -157,7 +157,7 @@ jobs:
         id: piout
         run: |
           set -eux
-          IMG=$(sudo find pi-gen/deploy -maxdepth 2 -name 'agora-os-base-*.img' | head -n1)
+          IMG=$(sudo find pi-gen/deploy -maxdepth 2 -name '*agora-os-base*.img' | head -n1)
           if [ -z "$IMG" ]; then
             echo "no pi-gen .img produced" >&2
             sudo ls -laR pi-gen/deploy || true
