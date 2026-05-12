@@ -54,7 +54,7 @@ concurrency:
 env:
   # NOTE: pinned to RPi-Distro/pi-gen master HEAD as of 2026-04-16.
   # Bump deliberately by editing this SHA + re-running the workflow.
-  PI_GEN_COMMIT: d2f70c5af1f007626c52f773f8e22209c4a34d38
+  PI_GEN_COMMIT: d01290946bae8acba172d99c8d4aa3fb335fcf6d
 
 jobs:
   build:
@@ -114,7 +114,7 @@ jobs:
           # the .img immediately to split it; xz would just be a detour.
           cat > pi-gen/config <<'EOF'
           IMG_NAME='agora-os-base'
-          RELEASE='bookworm'
+          RELEASE='trixie'
           TARGET_HOSTNAME='agora'
           FIRST_USER_NAME='agora'
           FIRST_USER_PASS='agora'
