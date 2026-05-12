@@ -89,6 +89,10 @@ jobs:
         run: |
           set -eux
           cp -r pi-gen-overlay/stage-agora pi-gen/stage-agora
+          # Pi-gen *executes* prerun.sh / 00-run.sh (does not source them),
+          # so they must be +x. The overlay tree's stored git mode may not
+          # carry the exec bit on Windows-authored checkouts; force it here.
+          chmod +x pi-gen/stage-agora/*.sh
           # Mark this stage as the export point -- pi-gen will build a .img
           # from its rootfs. Earlier stages do not run export-image.
           touch pi-gen/stage-agora/EXPORT_IMAGE
