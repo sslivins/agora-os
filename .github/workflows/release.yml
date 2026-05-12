@@ -1,0 +1,202 @@
+# Build and sign the agora-os image on every tag push.
+#
+# Flow (per Phase 0 plan, D53/D55):
+#   1. Checkout this repo on a GitHub-hosted arm64 runner (D55: no qemu).
+#   2. Clone pi-gen at a pinned SHA, drop our stage-agora overlay into it.
+#   3. Run pi-gen to build a stock Bookworm arm64 rootfs (the overlay is
+#      a no-op placeholder today -- TODO p0-pi-gen-overlay-followup).
+#   4. Split pi-gen's output .img into boot + rootfs tarballs.
+#   5. Run image-build/assemble.sh to lay out the 5-partition GPT image
+#      with both root slots, EEPROM templates, and dual pubkeys.
+#   6. Sign agora-os-*.img.zst with minisign using MINISIGN_SECRET.
+#   7. Attach .img.zst + .minisig to a draft GitHub Release.
+#
+# Hardening (D53):
+#   - All actions pinned by full SHA.
+#   - pi-gen pinned by full SHA.
+#   - MINISIGN_SECRET scoped to the sign step only.
+#   - workflow_dispatch enabled for manual builds during development; the
+#     real release path is tag push to v*.
+#
+# Branch protection on .github/workflows/* must be configured manually in
+# the GitHub UI (settings -> Branches -> protect main, restrict path).
+# See image-build/README.md.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # softprops/action-gh-release needs this to create the release
+
+jobs:
+  build:
+    name: build + sign agora-os image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout agora-os
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            quilt parted qemu-utils kpartx dosfstools zerofree zip \
+            bsdmainutils libcap2-bin grep rsync xz-utils file git curl \
+            bc gpg pigz xxd arch-test gdisk e2fsprogs zstd minisign \
+            rpi-eeprom
+
+      - name: Clone pi-gen at pinned SHA
+        # NOTE: pinned to RPi-Distro/pi-gen master HEAD as of 2026-04-16.
+        # Bump deliberately by editing this SHA + re-running the workflow.
+        run: |
+          set -eux
+          git clone https://github.com/RPi-Distro/pi-gen.git pi-gen
+          cd pi-gen
+          git checkout d2f70c5af1f007626c52f773f8e22209c4a34d38
+
+      - name: Install stage-agora overlay into pi-gen
+        run: |
+          set -eux
+          cp -r pi-gen-overlay/stage-agora pi-gen/stage-agora
+          # Mark this stage as the export point -- pi-gen will build a .img
+          # from its rootfs. Earlier stages do not run export-image.
+          touch pi-gen/stage-agora/EXPORT_IMAGE
+          # Skip noobs and avoid building stages we don't need.
+          touch pi-gen/stage2/SKIP_IMAGES
+          # Disable the desktop / full stages entirely.
+          for s in stage3 stage4 stage5; do
+            if [ -d "pi-gen/$s" ]; then
+              touch "pi-gen/$s/SKIP" "pi-gen/$s/SKIP_IMAGES"
+            fi
+          done
+
+      - name: Write pi-gen config
+        run: |
+          set -eux
+          cat > pi-gen/config <<'EOF'
+          IMG_NAME='agora-os-base'
+          RELEASE='bookworm'
+          TARGET_HOSTNAME='agora'
+          FIRST_USER_NAME='agora'
+          DISABLE_FIRST_BOOT_USER_RENAME=1
+          STAGE_LIST='stage0 stage1 stage2 stage-agora'
+          ENABLE_SSH=1
+          DEPLOY_COMPRESSION='none'
+          EOF
+
+      - name: Run pi-gen
+        # pi-gen must run as root for chroot + losetup.
+        run: |
+          set -eux
+          cd pi-gen
+          sudo ./build.sh
+
+      - name: Locate pi-gen output image
+        id: piout
+        run: |
+          set -eux
+          IMG=$(sudo find pi-gen/deploy -maxdepth 2 -name 'agora-os-base-*.img' | head -n1)
+          if [ -z "$IMG" ]; then
+            echo "no pi-gen .img produced" >&2
+            sudo ls -la pi-gen/deploy || true
+            exit 1
+          fi
+          echo "img=${IMG}" >> "$GITHUB_OUTPUT"
+
+      - name: Split pi-gen image into boot + rootfs tarballs
+        env:
+          PIGEN_IMG: ${{ steps.piout.outputs.img }}
+        run: |
+          set -eux
+          sudo mkdir -p /tmp/agora-build
+          sudo cp "$PIGEN_IMG" /tmp/agora-build/pigen.img
+
+          # Loop-attach with partition scanning. pi-gen produces a 2-partition
+          # MBR image: p1 = FAT boot (/boot/firmware/), p2 = ext4 root.
+          LOOP=$(sudo losetup --find --show --partscan /tmp/agora-build/pigen.img)
+          echo "attached at $LOOP"
+
+          sudo mkdir -p /tmp/agora-build/{boot,root}
+          sudo mount "${LOOP}p1" /tmp/agora-build/boot
+          sudo mount "${LOOP}p2" /tmp/agora-build/root
+
+          # Tar boot partition contents. These end up on our boot-A / boot-B
+          # FAT partitions in assemble.sh.
+          sudo tar -C /tmp/agora-build/boot -cf /tmp/agora-build/boot.tar .
+
+          # Tar root partition contents. The rootfs's /boot/firmware/ mount
+          # point will be empty at extract time -- our assemble.sh leaves it
+          # as a mount point since the per-slot fstab points it at boot-A or
+          # boot-B respectively.
+          sudo tar -C /tmp/agora-build/root \
+            --exclude='./boot/firmware/*' \
+            -cf /tmp/agora-build/rootfs.tar .
+
+          sudo umount /tmp/agora-build/boot
+          sudo umount /tmp/agora-build/root
+          sudo losetup -d "$LOOP"
+
+          ls -la /tmp/agora-build/
+
+      - name: Assemble 5-partition agora-os image
+        run: |
+          set -eux
+          OUT_IMG_ZST="/tmp/agora-build/agora-os-${GITHUB_REF_NAME:-dev}.img.zst"
+          sudo image-build/assemble.sh \
+            /tmp/agora-build/rootfs.tar \
+            /tmp/agora-build/boot.tar \
+            "$OUT_IMG_ZST"
+          sudo ls -la /tmp/agora-build/
+          echo "OUT_IMG_ZST=${OUT_IMG_ZST}" >> "$GITHUB_ENV"
+
+      - name: Sign image with minisign
+        # MINISIGN_SECRET is the full contents of the minisign .key file
+        # (generated offline via `minisign -G -W ...`, paper-backed, then
+        # pasted into the repo secret). The -W means no password, which is
+        # what minisign expects when feeding the key via stdin or a file in
+        # CI. See image-build/README.md for the keypair ceremony.
+        env:
+          MINISIGN_SECRET: ${{ secrets.MINISIGN_SECRET }}
+        run: |
+          set -eux
+          if [ -z "$MINISIGN_SECRET" ]; then
+            echo "MINISIGN_SECRET is not set -- configure it in repo Settings -> Secrets -> Actions" >&2
+            exit 1
+          fi
+          KEYFILE="$(mktemp)"
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET" > "$KEYFILE"
+          # -W => key has no password, signing is non-interactive.
+          # We add a trusted comment with the tag for forensic clarity.
+          TAG="${GITHUB_REF_NAME:-dev}"
+          minisign -S -W \
+            -s "$KEYFILE" \
+            -t "agora-os ${TAG} built by GH Actions on $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -m "$OUT_IMG_ZST"
+          shred -u "$KEYFILE" || rm -f "$KEYFILE"
+          sudo ls -la "$(dirname "$OUT_IMG_ZST")"
+
+      - name: Compute checksums
+        run: |
+          set -eux
+          cd "$(dirname "$OUT_IMG_ZST")"
+          sha256sum "$(basename "$OUT_IMG_ZST")" > "$(basename "$OUT_IMG_ZST").sha256"
+
+      - name: Create draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            /tmp/agora-build/agora-os-*.img.zst
+            /tmp/agora-build/agora-os-*.img.zst.minisig
+            /tmp/agora-build/agora-os-*.img.zst.sha256
