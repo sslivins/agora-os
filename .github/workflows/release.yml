@@ -212,6 +212,10 @@ jobs:
             /tmp/agora-build/rootfs.tar \
             /tmp/agora-build/boot.tar \
             "$OUT_IMG_ZST"
+          # assemble.sh runs as root, so /tmp/agora-build/ + the new .img.zst
+          # are owned by root. Hand the directory back to the runner user so
+          # the (unprivileged) minisign step can write the sibling .minisig.
+          sudo chown -R "$(id -u):$(id -g)" /tmp/agora-build
           sudo ls -la /tmp/agora-build/
           echo "OUT_IMG_ZST=${OUT_IMG_ZST}" >> "$GITHUB_ENV"
 
