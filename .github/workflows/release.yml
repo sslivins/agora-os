@@ -48,7 +48,8 @@ jobs:
           set -eux
           sudo apt-get update
           sudo apt-get install -y \
-            quilt parted qemu-utils kpartx dosfstools zerofree zip \
+            quilt parted qemu-utils qemu-user-binfmt debootstrap \
+            libarchive-tools kpartx dosfstools zerofree zip \
             bsdmainutils libcap2-bin grep rsync xz-utils file git curl \
             bc gpg pigz xxd arch-test gdisk e2fsprogs zstd minisign \
             rpi-eeprom
