@@ -1,0 +1,38 @@
+# Placeholder CI workflow — filled in by p0-release-pipeline.
+#
+# The end state (Phase 0):
+#
+#   on:
+#     push:
+#       tags:
+#         - 'v*'
+#
+#   jobs:
+#     build:
+#       runs-on: ubuntu-latest-arm64   # native arm64 runner per D55
+#       steps:
+#         - uses: actions/checkout@<SHA>          # pin actions by SHA (hardening)
+#         - name: Clone pi-gen at pinned SHA
+#           run: |
+#             git clone https://github.com/RPi-Distro/pi-gen pi-gen
+#             cd pi-gen && git checkout <PINNED-SHA>
+#         - name: Run pi-gen (produces rootfs + boot tarballs)
+#         - name: Assemble .img.zst (image-build/assemble.sh)
+#         - name: Sign with minisign           # MINISIGN_SECRET scoped to this job only
+#         - name: Upload to draft GitHub Release
+#
+# Hardening checklist (already promised in p0-release-pipeline description):
+#   1. Branch protection on .github/workflows/* (config on the GH side).
+#   2. Pin every action by full SHA, not tag.
+#   3. Scope MINISIGN_SECRET to the signing job only.
+
+name: build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "build.yml is a placeholder — see p0-release-pipeline."

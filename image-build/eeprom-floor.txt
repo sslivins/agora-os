@@ -1,0 +1,8 @@
+# Pinned Pi 5 EEPROM bootloader firmware commit.
+#
+# Filled in by p0-eeprom-template once we pick a floor version. Format:
+# one line, the upstream `rpi-eeprom` commit hash. Used at build time by
+#   rpi-eeprom-update -d -a -f /lib/firmware/raspberrypi/bootloader-2712/<this>.bin
+# and at firstboot to ensure the field device's EEPROM is >= this version.
+
+TODO-pin-after-testing-on-stockroom-Pi

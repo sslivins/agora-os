@@ -1,0 +1,28 @@
+# /etc/fstab — written into BOTH root slots by image-build/assemble.sh.
+#
+# Per D57 the rootfs mounts RW (not RO). Bundle apply overwrites the inactive
+# slot wholesale, so any drift is wiped on every OTA. If on-device drift
+# becomes a real problem we revisit this.
+#
+# {{BOOT_PARTLABEL}} is replaced by assemble.sh with `boot-A` or `boot-B`
+# depending on which root slot this fstab is being written into.
+#
+# /var/log bind-mounts into /data/var-log/ (D56) so it survives slot flips
+# and lives on the persistent data partition. logrotate caps the total at
+# 1 GB (see logrotate-agora.conf).
+
+# Note: rootfs ("/") is intentionally not listed here. The kernel mounts /
+# from the cmdline `root=PARTLABEL=root-A` (or root-B) argument before
+# fstab is consulted. Listing it in fstab as well leads to confusing
+# double-mount / fsck-pass behavior — let cmdline win unambiguously.
+# RW vs RO and noatime are baked into the kernel mount; remount-rw on
+# / is implicit because pi-gen builds rootfs writable (D57).
+
+# boot partition (per-slot)
+PARTLABEL={{BOOT_PARTLABEL}}  /boot/firmware   vfat  defaults,flush  0  2
+
+# persistent data
+PARTLABEL=data    /data            ext4  defaults,noatime  0  2
+
+# /var/log bind-mount → /data/var-log (D56)
+/data/var-log     /var/log         none  bind  0  0

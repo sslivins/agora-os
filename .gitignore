@@ -1,0 +1,21 @@
+# Build outputs
+dist/
+out/
+work/
+*.img
+*.img.zst
+*.img.xz
+*.sig
+
+# Pi-gen working tree (cloned/pinned in CI)
+pi-gen/
+
+# Local secrets — never commit
+*.pem
+*.key
+!image-build/*-pubkey.pem.example
+
+# Editor scratch
+*.swp
+*~
+.DS_Store

@@ -1,0 +1,22 @@
+# Pi 5 EEPROM configuration applied at image build by
+# `rpi-eeprom-config --apply` (see p0-eeprom-template, F9).
+#
+# This is the *config* half; the bootloader *firmware* itself is pinned
+# separately via `rpi-eeprom-update -d -a` to the commit recorded in
+# eeprom-floor.txt.
+#
+# IMPORTANT: EEPROM changes only take effect on a real power-cycle, not on a
+# soft reboot (F14). The Phase 0 acceptance test must cold-boot the device
+# after firstboot to verify.
+
+# Boot order: 0xf461 — try SD first, fall back to USB, never network.
+# Last digit `1` = SD. Keeping USB-mass-storage as a fallback is intentional
+# (F10): a bricked SD can be recovered by booting a USB stick without
+# opening the case.
+BOOT_ORDER=0xf461
+
+# No network install — closes agora#165.
+NET_INSTALL_AT_POWER_ON=0
+
+# Serial console available on UART for field debugging.
+BOOT_UART=1

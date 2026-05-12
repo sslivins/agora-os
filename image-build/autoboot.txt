@@ -1,0 +1,19 @@
+# Tryboot configuration for A/B rootfs.
+#
+# This file lives on BOTH boot-A and boot-B (F6) — the two copies are
+# byte-identical and kept in sync at runtime by agora-slot-mgr. If boot-A
+# becomes unreadable, the Pi 5 bootloader (with BOOT_ORDER=0xf461) will fall
+# through to boot-B without intervention.
+#
+# Default boot is the FAT partition referenced by [all] / boot_partition.
+# `vcgencmd reboot_to_tryboot && reboot` causes the bootloader to use
+# [tryboot] / boot_partition for exactly one boot — that's the mechanism
+# agora-slot-mgr uses to validate a freshly-applied slot before promoting
+# it (Phase 2).
+
+[all]
+tryboot_a_b=1
+boot_partition=1
+
+[tryboot]
+boot_partition=2
