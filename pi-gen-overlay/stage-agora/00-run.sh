@@ -14,6 +14,16 @@
 
 set -euo pipefail
 
+# Packages required by firstboot + future OTA path are installed via the
+# adjacent 00-packages file (pi-gen reads it automatically). Specifically:
+#   - gdisk          → sgdisk (firstboot layout expand)
+#   - parted         → parted + partprobe (firstboot partition grow)
+#   - dosfstools     → mkfs.vfat for boot-B
+#   - e2fsprogs      → mkfs.ext4 / resize2fs (usually present, defensive)
+#   - rpi-eeprom     → rpi-eeprom-config + rpi-eeprom-update (firstboot EEPROM floor)
+#   - minisign       → OTA signature verification (Phase 2)
+#   - zstd           → OTA bundle decompression (Phase 2)
+#
 # TODO(p0-pi-gen-overlay-followup): real overlay content lands here once
 # we identify the minimum set of packages/services we want baked into the
 # rootfs upstream of slot specialization. Likely candidates:

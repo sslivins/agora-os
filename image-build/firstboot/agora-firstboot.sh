@@ -37,6 +37,38 @@ log()  { echo "${LOG_PREFIX} $*"; }
 warn() { echo "${LOG_PREFIX} WARN: $*" >&2; }
 err()  { echo "${LOG_PREFIX} ERROR: $*" >&2; }
 
+# Mirror everything we print into a tmpfs file. On exit, main() best-effort
+# copies it onto the FAT32 boot-A partition so a brick can be diagnosed by
+# pulling the SD card and reading the log from Windows/macOS without needing
+# ext4 access.
+RUN_LOG="/run/agora-firstboot.log"
+mkdir -p "$(dirname "$RUN_LOG")" 2>/dev/null || true
+exec > >(tee -a "$RUN_LOG") 2>&1
+
+# ---------------------------------------------------------------------------
+# Preflight: verify the tools we rely on are actually installed in the rootfs.
+# Without this, a missing tool (e.g. sgdisk if `gdisk` wasn't apt-installed)
+# causes step 1 to silently `return 0`, the data partition never gets created,
+# local-fs.target fails on PARTLABEL=data, and the device drops to emergency
+# mode with no SSH access. Failing loudly here makes that class of bug obvious.
+# ---------------------------------------------------------------------------
+preflight_tools() {
+    local tool missing=()
+    for tool in sgdisk parted partprobe partx udevadm \
+                mkfs.vfat mkfs.ext4 resize2fs blkid findmnt lsblk mountpoint; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing+=("$tool")
+        fi
+    done
+    if (( ${#missing[@]} > 0 )); then
+        err "preflight: missing required tools: ${missing[*]}"
+        err "preflight: install via pi-gen-overlay/stage-agora/00-packages"
+        return 1
+    fi
+    log "preflight: all required tools present"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Step 1: expand the ship-time 2-partition layout to the on-device 5-partition
 # layout.
@@ -95,7 +127,11 @@ step_layout_expand() {
         err "step 1: sgdisk -e failed; aborting expand"
         return 0
     fi
-    partprobe "$diskdev" 2>/dev/null || true
+    # partx -u syncs the kernel's in-memory partition table with the on-disk
+    # table without requiring an unmounted disk (unlike partprobe / BLKRRPART
+    # which fails with EBUSY on a mounted root). udevadm settle then waits
+    # for /dev/disk/by-partlabel/ symlinks to materialize.
+    partx -u "$diskdev" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 
     # Grow root-A (P2) from 3 GB to 8 GB. Partition 2 starts at 513 MiB
@@ -106,7 +142,9 @@ step_layout_expand() {
         err "step 1: parted resizepart 2 failed; aborting expand"
         return 0
     fi
-    partprobe "$diskdev" 2>/dev/null || true
+    # partx -u --nr 2 issues BLKPG_RESIZE_PARTITION which works on the busy
+    # root partition; partprobe's BLKRRPART would fail with EBUSY here.
+    partx -u --nr 2 "$diskdev" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 
     # Online ext4 resize of mounted /. Standard RPi OS init_resize.sh pattern.
@@ -128,7 +166,9 @@ step_layout_expand() {
         err "step 1: sgdisk --new for P3/P4/P5 failed; aborting expand"
         return 0
     fi
-    partprobe "$diskdev" 2>/dev/null || true
+    # partx -a adds newly-discovered partitions (P3/P4/P5) to the kernel's
+    # view; partx -u alone won't pick up previously-unknown partitions.
+    partx -a "$diskdev" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 
     # Format the three new partitions. -F forces mkfs.ext4 past its
@@ -206,7 +246,7 @@ step_resize_data() {
         # will show up in resize2fs below.
         warn "step 2: parted resizepart non-zero (possibly benign); continuing"
     fi
-    partprobe "/dev/${disk}" 2>/dev/null || true
+    partx -u --nr "${part_num}" "/dev/${disk}" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 
     log "step 2: resizing ext4 filesystem on ${data_dev}"
@@ -425,8 +465,37 @@ step_breadcrumb() {
 }
 
 # ---------------------------------------------------------------------------
+# Tail step: copy /run/agora-firstboot.log onto the FAT32 boot-A partition so
+# a brick can be diagnosed from any host (Windows/macOS) by reading the boot
+# partition without needing ext4 access. Best-effort — never fails the unit.
+# ---------------------------------------------------------------------------
+copy_log_to_boot() {
+    local boot_dev boot_mnt
+    boot_dev=$(blkid -L boot-A 2>/dev/null) || true
+    if [[ -z "$boot_dev" ]]; then
+        log "tail: PARTLABEL=boot-A not found; skipping log copy"
+        return 0
+    fi
+    boot_mnt=$(mktemp -d /tmp/boot-firmware-log.XXXXXX) || return 0
+    if mount -t vfat -o rw,sync "$boot_dev" "$boot_mnt" 2>/dev/null; then
+        cp -f "$RUN_LOG" "${boot_mnt}/agora-firstboot.log" 2>/dev/null || true
+        sync
+        umount "$boot_mnt" 2>/dev/null || true
+        log "tail: copied firstboot log to boot-A:/agora-firstboot.log"
+    else
+        warn "tail: could not mount boot-A for log copy; skipping"
+    fi
+    rmdir "$boot_mnt" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
 main() {
     log "starting (idempotent, no sentinel-gate per F5)"
+    if ! preflight_tools; then
+        err "preflight failed; aborting firstboot before destructive ops"
+        copy_log_to_boot
+        return 0
+    fi
     step_layout_expand
     step_resize_data
     step_eeprom_floor
@@ -434,6 +503,7 @@ main() {
     step_timesyncd
     step_breadcrumb
     log "done"
+    copy_log_to_boot
 }
 
 main "$@"

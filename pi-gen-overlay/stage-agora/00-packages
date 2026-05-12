@@ -1,0 +1,7 @@
+gdisk
+parted
+dosfstools
+e2fsprogs
+rpi-eeprom
+minisign
+zstd
