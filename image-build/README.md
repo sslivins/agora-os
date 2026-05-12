@@ -35,10 +35,35 @@ sudo apt-get install -y \
     rpi-eeprom
 ```
 
-Free disk on the build host: **at least 20 GB**. The assembled image is
-~17 GB pre-compression (5 partitions: 512 + 512 + 8192 + 8192 + 1024 MB
-per D52) before xz brings it down to ~1–2 GB. The intermediate pi-gen
-build directory adds another ~6 GB.
+Free disk on the build host: **at least 12 GB**. The assembled image
+ships only 2 partitions (`boot-A` 512 MB + `root-A` 3 GB ≈ ~3.5 GB raw)
+before xz -T0 -9 brings it down to ~500–700 MB. On-device firstboot
+expands this to the full 5-partition layout (adds `boot-B`, `root-B`,
+`data`; grows `root-A` to 8 GB) — see §1.1 below. The intermediate
+pi-gen build directory adds another ~6 GB.
+
+Flash time on a typical USB 2.0 SD writer: **~3 minutes** for the
+shrunken ship image, vs ~15 minutes for the prior full-5-partition
+image. First-boot expansion adds ~30 seconds on top before
+`agora.service` comes up.
+
+### 1.1 Ship layout vs runtime layout
+
+The image you flash is **not** the layout the running device sees.
+
+| Phase            | Partitions on disk                                    |
+|------------------|-------------------------------------------------------|
+| Flash (ship)     | `boot-A` (512 MB) + `root-A` (3 GB)                  |
+| After firstboot  | `boot-A` + `root-A` (8 GB) + `boot-B` + `root-B` + `data` (rest of card) |
+
+`agora-firstboot.service` (`firstboot/agora-firstboot.sh`, step
+`layout_expand`) is the only thing that performs this expansion. It is
+idempotent: a second boot detects that `data` already exists by
+`PARTLABEL` and short-circuits.
+
+The 5-partition layout described in the rest of this README, in
+`README.md`, and in `docs/acceptance.md` is the **runtime** layout. All
+acceptance checks (A4 onward) run **after** first-boot has completed.
 
 Required to flash to a real Pi 5 for the stockroom smoke-test (§5):
 
@@ -464,7 +489,8 @@ When cutting an `agora-os` release that bumps `agora_app_floor`:
 
 | File | Purpose |
 |---|---|
-| `assemble.sh` | The 5-partition GPT image assembler (D55). Reads `rootfs.tar` + `boot.tar`, produces a signed-elsewhere `.img.xz`. |
+| `assemble.sh` | The **2-partition** ship-image assembler (D55). Reads `rootfs.tar` + `boot.tar`, produces a signed-elsewhere `.img.xz`. Firstboot expands to the runtime 5-partition layout — see §1.1. |
+| `partition.sh` | `sgdisk` helper that lays down the **ship** GPT: `boot-A` + `root-A` only. |
 | `eeprom-floor.txt` | Bootloader-timestamp floor (Unix epoch). Pinned per major release per §6. |
 | `eeprom-config.template` | The `BOOT_ORDER` / `NET_INSTALL_AT_POWER_ON` / `BOOT_UART` config baked into both `boot-A` and `boot-B` (F6 mirror) and re-applied by firstboot if drifted (D54 / F9 two-operation bring-up). |
 | `firstboot/agora-firstboot.sh` | On-device firstboot orchestrator (idempotent per F5). Resizes `/data`, applies EEPROM floor, generates `/etc/machine-id` + SSH host keys (F11), starts `systemd-timesyncd` (F20). |

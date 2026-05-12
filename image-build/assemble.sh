@@ -2,7 +2,12 @@
 # assemble.sh — bolt-on assembler stage (D55).
 #
 # Takes the rootfs + boot tarballs emitted by stock pi-gen and produces a
-# flashable 5-partition GPT .img.xz per the Phase 0 design.
+# flashable 2-partition GPT .img.xz per the Phase 0 design.
+#
+# The flashable image ships ONLY boot-A + root-A. agora-firstboot grows
+# root-A from 3 GB to 8 GB and adds boot-B + root-B + data on the device's
+# first boot. This keeps the .img.xz ~600 MB and the SD-card write ~3 min
+# instead of ~15 min for the full 18 GB layout. See docs/firstboot.md.
 #
 # Usage:
 #   assemble.sh <rootfs-tar> <boot-tar> <out-img-xz>
@@ -25,15 +30,15 @@ WORK="$(mktemp -d -t agora-os-build.XXXXXX)"
 trap 'cleanup' EXIT
 
 IMG="${WORK}/agora-os.img"
-# Raw image size. Partitions sum to 2×512MB + 2×8GB + 1GB = 18432 MB exactly.
-# We need headroom for (a) the 1 MB GPT-aligned start offset and (b) the
-# backup GPT table at the end of the disk (~17 KB). 32 MB is plenty.
-IMG_SIZE_MB=18464
+# Raw image size. Partitions sum to 512 MB + 3072 MB = 3584 MB. We need
+# headroom for (a) the 1 MB GPT-aligned start offset and (b) the backup
+# GPT table at the end of the disk (~17 KB). 16 MB is plenty.
+IMG_SIZE_MB=3600
 
 cleanup() {
     set +e
     # Unmount anything we mounted.
-    for mp in boot-A boot-B root-A root-B data; do
+    for mp in boot-A root-A; do
         if mountpoint -q "${WORK}/mnt/${mp}" 2>/dev/null; then
             umount "${WORK}/mnt/${mp}"
         fi
@@ -65,12 +70,14 @@ create_image() {
 # ---------------------------------------------------------------------------
 attach_loop() {
     LOOPDEV="$(losetup --show --find --partscan "$IMG")"
-    # Map partition device names: /dev/loopXp1 .. /dev/loopXp5
+    # Image-time partition numbering (final on-device numbering after
+    # firstboot is documented in docs/firstboot.md):
+    #   p1 = boot-A
+    #   p2 = root-A
+    # The remaining partitions (boot-B = p3, root-B = p4, data = p5) are
+    # created by agora-firstboot.
     BOOT_A_DEV="${LOOPDEV}p1"
-    BOOT_B_DEV="${LOOPDEV}p2"
-    ROOT_A_DEV="${LOOPDEV}p3"
-    ROOT_B_DEV="${LOOPDEV}p4"
-    DATA_DEV="${LOOPDEV}p5"
+    ROOT_A_DEV="${LOOPDEV}p2"
 }
 
 # ---------------------------------------------------------------------------
@@ -78,147 +85,122 @@ attach_loop() {
 # ---------------------------------------------------------------------------
 format_partitions() {
     mkfs.vfat -F 32 -n boot-A "$BOOT_A_DEV"
-    mkfs.vfat -F 32 -n boot-B "$BOOT_B_DEV"
     mkfs.ext4 -F -L root-A "$ROOT_A_DEV"
-    mkfs.ext4 -F -L root-B "$ROOT_B_DEV"
-    mkfs.ext4 -F -L data   "$DATA_DEV"
 }
 
 # ---------------------------------------------------------------------------
 # Step 4: mount everything under ${WORK}/mnt.
 # ---------------------------------------------------------------------------
 mount_partitions() {
-    mkdir -p "${WORK}/mnt/"{boot-A,boot-B,root-A,root-B,data}
+    mkdir -p "${WORK}/mnt/"{boot-A,root-A}
     mount "$ROOT_A_DEV" "${WORK}/mnt/root-A"
-    mount "$ROOT_B_DEV" "${WORK}/mnt/root-B"
     mount "$BOOT_A_DEV" "${WORK}/mnt/boot-A"
-    mount "$BOOT_B_DEV" "${WORK}/mnt/boot-B"
-    mount "$DATA_DEV"   "${WORK}/mnt/data"
 }
 
 # ---------------------------------------------------------------------------
-# Step 5: untar pi-gen output into both slot pairs.
-# Both root slots are byte-identical at build time; both boot slots are
-# byte-identical at build time. Per-slot specialization (cmdline.txt, fstab
-# BOOT_PARTLABEL substitution) happens in step 6.
+# Step 5: untar pi-gen output into the slot-A pair.
+# Per-slot specialization (cmdline.txt, fstab BOOT_PARTLABEL substitution)
+# happens in step 6.
 # ---------------------------------------------------------------------------
 populate_slots() {
     tar -xf "$ROOTFS_TAR" -C "${WORK}/mnt/root-A"
-    tar -xf "$ROOTFS_TAR" -C "${WORK}/mnt/root-B"
     tar -xf "$BOOT_TAR"   -C "${WORK}/mnt/boot-A"
-    tar -xf "$BOOT_TAR"   -C "${WORK}/mnt/boot-B"
 }
 
 # ---------------------------------------------------------------------------
 # Step 6: write per-slot boot config and fstab.
 # Bookworm puts the FAT boot partition at /boot/firmware/ (F15).
-# autoboot.txt is byte-identical on both boot partitions (F6).
+# autoboot.txt's [tryboot] section already targets partition 3 (boot-B,
+# created by firstboot); the [all] section targets partition 1 (boot-A).
 # ---------------------------------------------------------------------------
 write_boot_config() {
     install -m 0644 "${HERE}/cmdline-A.txt" "${WORK}/mnt/boot-A/cmdline.txt"
-    install -m 0644 "${HERE}/cmdline-B.txt" "${WORK}/mnt/boot-B/cmdline.txt"
     install -m 0644 "${HERE}/autoboot.txt"  "${WORK}/mnt/boot-A/autoboot.txt"
-    install -m 0644 "${HERE}/autoboot.txt"  "${WORK}/mnt/boot-B/autoboot.txt"
 
-    # Per-slot fstab with BOOT_PARTLABEL substituted in.
+    # root-A fstab (BOOT_PARTLABEL=boot-A). The root-B fstab is written by
+    # the first OTA that populates boot-B + root-B.
     sed 's/{{BOOT_PARTLABEL}}/boot-A/' "${HERE}/fstab.template" \
         > "${WORK}/mnt/root-A/etc/fstab"
-    sed 's/{{BOOT_PARTLABEL}}/boot-B/' "${HERE}/fstab.template" \
-        > "${WORK}/mnt/root-B/etc/fstab"
-    chmod 0644 "${WORK}/mnt/root-A/etc/fstab" "${WORK}/mnt/root-B/etc/fstab"
+    chmod 0644 "${WORK}/mnt/root-A/etc/fstab"
 }
 
 # ---------------------------------------------------------------------------
-# Step 7: per-slot rootfs customization.
-# Applied identically to both root slots.
+# Step 7: rootfs customization (root-A only; root-B is populated by the
+# first OTA bundle, not at image-build time).
 # ---------------------------------------------------------------------------
 customize_rootfs() {
-    for slot in root-A root-B; do
-        local R="${WORK}/mnt/${slot}"
+    local R="${WORK}/mnt/root-A"
 
-        # logrotate cap for /var/log (D56).
-        install -m 0644 "${HERE}/logrotate-agora.conf" \
-            "${R}/etc/logrotate.d/agora"
+    # logrotate cap for /var/log (D56).
+    install -m 0644 "${HERE}/logrotate-agora.conf" \
+        "${R}/etc/logrotate.d/agora"
 
-        # /var/log bind-mount target (D56). fstab already points at it.
-        mkdir -p "${R}/var/log"   # ensure the bind target exists in the slot
+    # /var/log bind-mount target (D56). fstab already points at it.
+    mkdir -p "${R}/var/log"   # ensure the bind target exists in the slot
 
-        # Strip per-device identity (F11) — firstboot regenerates these.
-        : > "${R}/etc/machine-id"
-        rm -f "${R}"/etc/ssh/ssh_host_*
+    # Strip per-device identity (F11) — firstboot regenerates these.
+    : > "${R}/etc/machine-id"
+    rm -f "${R}"/etc/ssh/ssh_host_*
 
-        # Enable systemd-timesyncd (F20). Pi 5 has no RTC battery by default;
-        # without NTP the device can boot at epoch 0.
-        ln -sf /lib/systemd/system/systemd-timesyncd.service \
-            "${R}/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service"
+    # Enable systemd-timesyncd (F20). Pi 5 has no RTC battery by default;
+    # without NTP the device can boot at epoch 0.
+    ln -sf /lib/systemd/system/systemd-timesyncd.service \
+        "${R}/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service"
 
-        # Signing pubkeys for OTA bundle verification (D54).
-        mkdir -p "${R}/etc/agora"
-        # TODO(p0-release-pipeline): these are committed as .example files;
-        # CI substitutes the real pubkeys at build time.
-        install -m 0644 "${HERE}/update-pubkey.pem.example" \
-            "${R}/etc/agora/update-pubkey.pem"
-        install -m 0644 "${HERE}/update-pubkey-recovery.pem.example" \
-            "${R}/etc/agora/update-pubkey-recovery.pem"
+    # Signing pubkeys for OTA bundle verification (D54).
+    mkdir -p "${R}/etc/agora"
+    # TODO(p0-release-pipeline): these are committed as .example files;
+    # CI substitutes the real pubkeys at build time.
+    install -m 0644 "${HERE}/update-pubkey.pem.example" \
+        "${R}/etc/agora/update-pubkey.pem"
+    install -m 0644 "${HERE}/update-pubkey-recovery.pem.example" \
+        "${R}/etc/agora/update-pubkey-recovery.pem"
 
-        # Version file (F17, Decision #2).
-        # TODO(p0-release-pipeline): CI substitutes the real values.
-        cat > "${R}/etc/agora/version" <<'EOF'
+    # Version file (F17, Decision #2).
+    # TODO(p0-release-pipeline): CI substitutes the real values.
+    cat > "${R}/etc/agora/version" <<'EOF'
 # Filled in by CI at build time.
 agora_os_version=TODO
 agora_app_floor=TODO
 EOF
 
-        # agora-firstboot.service: oneshot, idempotent, runs before
-        # local-fs.target so step 1 (grow partition 5) lands while
-        # /data is still unmounted. See docs/firstboot.md.
-        install -d -m 0755 "${R}/usr/local/sbin"
-        install -m 0755 "${HERE}/firstboot/agora-firstboot.sh" \
-            "${R}/usr/local/sbin/agora-firstboot"
-        install -d -m 0755 "${R}/etc/systemd/system"
-        install -m 0644 "${HERE}/firstboot/agora-firstboot.service" \
-            "${R}/etc/systemd/system/agora-firstboot.service"
-        # Enable via local-fs.target.wants (not sysinit.target.wants —
-        # sysinit runs AFTER local-fs.target).
-        install -d -m 0755 "${R}/etc/systemd/system/local-fs.target.wants"
-        ln -sf /etc/systemd/system/agora-firstboot.service \
-            "${R}/etc/systemd/system/local-fs.target.wants/agora-firstboot.service"
+    # agora-firstboot.service: oneshot, idempotent. Runs early enough to
+    # expand the partition table (step 1) BEFORE local-fs.target tries to
+    # mount /data — because /data doesn't exist yet on a fresh flash; the
+    # firstboot script creates it. See docs/firstboot.md.
+    install -d -m 0755 "${R}/usr/local/sbin"
+    install -m 0755 "${HERE}/firstboot/agora-firstboot.sh" \
+        "${R}/usr/local/sbin/agora-firstboot"
+    install -d -m 0755 "${R}/etc/systemd/system"
+    install -m 0644 "${HERE}/firstboot/agora-firstboot.service" \
+        "${R}/etc/systemd/system/agora-firstboot.service"
+    # Enable via local-fs.target.wants (not sysinit.target.wants —
+    # sysinit runs AFTER local-fs.target).
+    install -d -m 0755 "${R}/etc/systemd/system/local-fs.target.wants"
+    ln -sf /etc/systemd/system/agora-firstboot.service \
+        "${R}/etc/systemd/system/local-fs.target.wants/agora-firstboot.service"
 
-    done
-
-    # EEPROM artifacts go into /boot/firmware/ (the BOOT partitions, not the
-    # rootfs slots) because that's where rpi-eeprom-update / rpi-eeprom-config
-    # look for staged updates. Per F6 we keep boot-A and boot-B byte-identical
-    # so both slots get the same files. Consumed by step 2 of
-    # /usr/local/sbin/agora-firstboot on the device. (p0-eeprom-template, F9)
-    for boot in boot-A boot-B; do
-        local B="${WORK}/mnt/${boot}"
-        install -m 0644 "${HERE}/eeprom-config.template" \
-            "${B}/agora-eeprom-config.txt"
-        install -m 0644 "${HERE}/eeprom-floor.txt" \
-            "${B}/agora-eeprom-floor.txt"
-    done
+    # EEPROM artifacts go into /boot/firmware/ (the boot partition, not the
+    # rootfs) because that's where rpi-eeprom-update / rpi-eeprom-config
+    # look for staged updates. (p0-eeprom-template, F9). The first OTA will
+    # write the same files to boot-B when it populates that partition.
+    local B="${WORK}/mnt/boot-A"
+    install -m 0644 "${HERE}/eeprom-config.template" \
+        "${B}/agora-eeprom-config.txt"
+    install -m 0644 "${HERE}/eeprom-floor.txt" \
+        "${B}/agora-eeprom-floor.txt"
 }
 
 # ---------------------------------------------------------------------------
-# Step 8: seed the data partition.
-# ---------------------------------------------------------------------------
-seed_data_partition() {
-    echo 1 > "${WORK}/mnt/data/SCHEMA_VERSION"
-    mkdir -p "${WORK}/mnt/data/var-log"
-    chmod 0755 "${WORK}/mnt/data/var-log"
-}
-
-# ---------------------------------------------------------------------------
-# Step 9: tear down mounts, detach loop, compress the image.
+# Step 8: tear down mounts, detach loop, compress the image.
+# Data partition seeding (SCHEMA_VERSION, /data/var-log/) is deferred to
+# agora-firstboot because the data partition doesn't exist yet at image
+# build time.
 # ---------------------------------------------------------------------------
 finalize_image() {
     sync
-    umount "${WORK}/mnt/data"
     umount "${WORK}/mnt/boot-A"
-    umount "${WORK}/mnt/boot-B"
     umount "${WORK}/mnt/root-A"
-    umount "${WORK}/mnt/root-B"
     losetup -d "$LOOPDEV"
     LOOPDEV=""
 
@@ -243,7 +225,6 @@ main() {
     populate_slots
     write_boot_config
     customize_rootfs
-    seed_data_partition
     finalize_image
 }
 

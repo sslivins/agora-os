@@ -14,8 +14,14 @@ of that plan one-for-one.
 - A tagged `agora-os` release. The release workflow has produced
   `agora-os-<tag>.img.xz` + `<tag>.img.xz.minisig` + `<tag>.img.xz.sha256`
   on the GitHub Release.
-- A **32 GB or larger** SD card (D52 — the 5-partition layout occupies
-  ~17 GB before `/data` is expanded).
+- A **32 GB or larger** SD card (D52 — the runtime 5-partition layout
+  occupies ~17 GB after firstboot expands the ship image; the data
+  partition then fills the rest of the card).
+
+  Note: the image you flash is only ~3.5 GB raw / ~600 MB xz — a small
+  2-partition ship layout (`boot-A` + `root-A`). `agora-firstboot.service`
+  expands it to the full 5-partition runtime layout on first boot. All
+  acceptance checks below assume firstboot has completed.
 - A Pi 5. For the v1.0.0 acceptance run, use the **oldest Pi 5 in
   stockroom** (F16, see `image-build/README.md` §5). For subsequent
   patch releases, any Pi 5 the operator has on hand is fine — the
@@ -94,25 +100,29 @@ Wait ~3 minutes. Confirm:
 
 `journalctl -u agora-firstboot.service -b` shows all of:
 
-- Data-partition resize executed (or "already full, skipping" if you
-  flashed onto a card where someone else pre-resized — for a fresh
-  card the resize should actually run).
+- **Layout expansion** ran: `root-A` resized 3 GB → 8 GB; `boot-B`,
+  `root-B`, and `data` partitions created with correct PARTLABELs. On
+  a second boot this step short-circuits because `PARTLABEL=data`
+  already resolves.
+- Data-partition resize executed (no-op after layout expansion — the
+  data partition is created at full card size by layout expansion).
 - EEPROM config applied or "already current."
 - EEPROM floor applied or "already at floor."
 - `/etc/machine-id` generated (F11).
 - `/etc/ssh/ssh_host_*` generated (F11).
 - `systemd-timesyncd` started (F20).
 
-### A5. `/data` was expanded to fill the card
+### A5. `/data` was created and fills the card
 
 ```sh
 lsblk -bn -o NAME,SIZE /dev/mmcblk0
 ```
 
-Partition 5 (`data`) size, in bytes, must be approximately
-`total_card_size - 17 GiB`. For a 32 GB card that's ~15 GiB on the
-data partition. The first-boot resize is one-shot and idempotent — a
-second boot does not re-trigger it (see A12).
+Partition 5 (`data`) exists (it did **not** exist in the flashed image —
+firstboot's layout-expand step created it) and its size, in bytes, is
+approximately `total_card_size - 17 GiB`. For a 32 GB card that's
+~15 GiB on the data partition. Layout expansion is one-shot and
+idempotent — a second boot does not re-trigger it (see A16).
 
 ### A6. `/data/var-log/` bind-mount in place (D56)
 

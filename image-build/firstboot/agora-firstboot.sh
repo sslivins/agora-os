@@ -15,12 +15,19 @@
 #     itself only exits non-zero on truly catastrophic plumbing failure.
 #
 # Steps:
-#   1. Grow partition 5 (PARTLABEL=data) to fill the device + resize2fs (F8).
-#   2. Apply pinned EEPROM floor if current < floor (F9, F14: takes effect
+#   1. Expand layout from the ship-time 2-partition image (boot-A + root-A)
+#      to the on-device 5-partition layout: grow root-A from 3 GB to 8 GB,
+#      add boot-B (P3, 512 MB), root-B (P4, 8 GB), data (P5, fills card).
+#      Format the new partitions and seed /data (SCHEMA_VERSION=1, /data/var-log/).
+#      Idempotent: short-circuits if P5 already exists. See docs/firstboot.md.
+#   2. Grow partition 5 (PARTLABEL=data) to fill the device + resize2fs (F8).
+#      In the normal flash path this is a no-op (step 1 already sized data
+#      to fill the card). Still useful for dd-clone-to-bigger-SD flows.
+#   3. Apply pinned EEPROM floor if current < floor (F9, F14: takes effect
 #      on next power-cycle, not soft reboot).
-#   3. Regenerate /etc/machine-id and ssh host keys if missing (F11).
-#   4. Enable + start systemd-timesyncd (F20).
-#   5. Drop /data/.firstboot-done breadcrumb (informational only, NOT gating).
+#   4. Regenerate /etc/machine-id and ssh host keys if missing (F11).
+#   5. Enable + start systemd-timesyncd (F20).
+#   6. Drop /data/.firstboot-done breadcrumb (informational only, NOT gating).
 
 set -u
 shopt -s nullglob
@@ -31,7 +38,138 @@ warn() { echo "${LOG_PREFIX} WARN: $*" >&2; }
 err()  { echo "${LOG_PREFIX} ERROR: $*" >&2; }
 
 # ---------------------------------------------------------------------------
-# Step 1: grow partition 5 (PARTLABEL=data) to fill the device (F8).
+# Step 1: expand the ship-time 2-partition layout to the on-device 5-partition
+# layout.
+#
+# The flashable image is small (~3.5 GB raw, ~600 MB xz) and ships only
+# boot-A (P1, 512 MB) + root-A (P2, 3 GB). This step:
+#   * Grows root-A from 3 GB to 8 GB (online ext4 resize on mounted /).
+#   * Adds boot-B (P3, 512 MB), root-B (P4, 8 GB), data (P5, fills card).
+#   * Formats the three new partitions.
+#   * Seeds /data with SCHEMA_VERSION=1 and creates /data/var-log/, /data/agora/.
+#
+# Idempotency: short-circuits if P5 already exists. Safe to re-run after
+# any partial-failure crash mid-step because each sub-step has its own
+# pre-condition check.
+#
+# Pre-mount per F8 — unit ordering enforces Before=local-fs.target — so
+# /data isn't mounted yet (it doesn't even exist as a partition yet). The
+# fstab line for /data resolves cleanly on local-fs.target after this step
+# completes.
+#
+# root-B and boot-B stay empty (just FS headers) until the first OTA — see
+# checkpoint 035. Acceptable for Phase 0 since there's no OTA yet.
+# ---------------------------------------------------------------------------
+step_layout_expand() {
+    local root_dev disk
+
+    # Idempotency check: if P5 exists by PARTLABEL=data, this step has
+    # already run successfully. Skip.
+    if blkid -L data >/dev/null 2>&1; then
+        log "step 1: PARTLABEL=data already present; layout already expanded"
+        return 0
+    fi
+
+    # Find the running root partition (e.g. /dev/mmcblk0p2) and derive the
+    # parent disk (e.g. mmcblk0).
+    root_dev=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    if [[ -z "$root_dev" ]]; then
+        err "step 1: could not determine root device from findmnt; aborting expand"
+        return 0
+    fi
+    disk=$(lsblk -ndo PKNAME "$root_dev" 2>/dev/null || true)
+    if [[ -z "$disk" ]]; then
+        err "step 1: could not derive parent disk from ${root_dev}; aborting expand"
+        return 0
+    fi
+    local diskdev="/dev/${disk}"
+
+    log "step 1: expanding layout on ${diskdev} (root=${root_dev})"
+
+    # Move the backup GPT table to the end of the actual device. The image's
+    # backup GPT sits at the image's tail (~3.6 GB in), not the SD card's
+    # tail. Without -e, sgdisk's subsequent --new operations on space past
+    # the image tail will be misaligned with the (still image-sized) GPT.
+    log "step 1: sgdisk -e (move backup GPT to end of ${diskdev})"
+    if ! sgdisk -e "$diskdev"; then
+        err "step 1: sgdisk -e failed; aborting expand"
+        return 0
+    fi
+    partprobe "$diskdev" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    # Grow root-A (P2) from 3 GB to 8 GB. Partition 2 starts at 513 MiB
+    # (1 MiB GPT start + 512 MiB boot-A); end = 513 + 8192 = 8705 MiB.
+    # parted -f / --fix forces it to accept the resize on a mounted partition.
+    log "step 1: parted resizepart 2 to 8705MiB (root-A 3GB -> 8GB)"
+    if ! parted -s -f "$diskdev" resizepart 2 8705MiB; then
+        err "step 1: parted resizepart 2 failed; aborting expand"
+        return 0
+    fi
+    partprobe "$diskdev" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    # Online ext4 resize of mounted /. Standard RPi OS init_resize.sh pattern.
+    log "step 1: resize2fs on mounted root ${root_dev}"
+    if ! resize2fs "$root_dev"; then
+        err "step 1: resize2fs failed; continuing (P3/P4/P5 creation may still proceed)"
+    fi
+
+    # Add P3=boot-B (512 MiB), P4=root-B (8192 MiB = 8 GB), P5=data (rest).
+    # 0700 is the GPT "Microsoft basic data" type; matches what assemble.sh
+    # sets on P1/P2. -c sets the partition NAME which kernel exposes as
+    # /dev/disk/by-partlabel/<name>.
+    log "step 1: sgdisk creating P3 boot-B (512 MiB), P4 root-B (8 GiB), P5 data (rest)"
+    if ! sgdisk \
+            --new=3:0:+512MiB  -c 3:boot-B -t 3:0700 \
+            --new=4:0:+8192MiB -c 4:root-B -t 4:0700 \
+            --new=5:0:0        -c 5:data   -t 5:0700 \
+            "$diskdev"; then
+        err "step 1: sgdisk --new for P3/P4/P5 failed; aborting expand"
+        return 0
+    fi
+    partprobe "$diskdev" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    # Format the three new partitions. -F forces mkfs.ext4 past its
+    # "this looks like a partition table" sanity check (a fresh GPT entry
+    # has no signature so this is belt-and-suspenders).
+    log "step 1: mkfs.vfat boot-B, mkfs.ext4 root-B, mkfs.ext4 data"
+    if ! mkfs.vfat -F 32 -n boot-B /dev/disk/by-partlabel/boot-B; then
+        err "step 1: mkfs.vfat boot-B failed; continuing"
+    fi
+    if ! mkfs.ext4 -F -L root-B /dev/disk/by-partlabel/root-B; then
+        err "step 1: mkfs.ext4 root-B failed; continuing"
+    fi
+    if ! mkfs.ext4 -F -L data /dev/disk/by-partlabel/data; then
+        err "step 1: mkfs.ext4 data failed; aborting seed"
+        return 0
+    fi
+    udevadm settle 2>/dev/null || true
+
+    # Seed /data: SCHEMA_VERSION=1, /data/var-log/, /data/agora/. Mount
+    # temporarily under /mnt/data; local-fs.target will (re-)mount under
+    # /data via fstab in a few seconds.
+    log "step 1: seeding /data (SCHEMA_VERSION=1, /data/var-log/, /data/agora/)"
+    local seed_mnt
+    seed_mnt=$(mktemp -d /tmp/data-seed.XXXXXX)
+    if ! mount /dev/disk/by-partlabel/data "$seed_mnt"; then
+        err "step 1: could not mount data partition for seeding; continuing"
+        rmdir "$seed_mnt" 2>/dev/null || true
+        return 0
+    fi
+    echo 1 > "${seed_mnt}/SCHEMA_VERSION"
+    mkdir -p "${seed_mnt}/var-log" "${seed_mnt}/agora"
+    chmod 0755 "${seed_mnt}/var-log" "${seed_mnt}/agora"
+    sync
+    umount "$seed_mnt"
+    rmdir "$seed_mnt" 2>/dev/null || true
+
+    log "step 1: layout expansion complete (root-A=8GB, boot-B/root-B/data created)"
+}
+
+# ---------------------------------------------------------------------------
+# Step 2: grow partition 5 (PARTLABEL=data) to fill the device (F8).
 #
 # Pre-mount per F8 — unit ordering enforces Before=local-fs.target. Uses
 # `parted resizepart ... 100%` + `resize2fs`, both idempotent:
@@ -45,42 +183,42 @@ step_resize_data() {
 
     data_dev=$(blkid -L data 2>/dev/null) || true
     if [[ -z "$data_dev" ]]; then
-        warn "step 1: no partition with PARTLABEL=data; skipping resize"
+        warn "step 2: no partition with PARTLABEL=data; skipping resize"
         return 0
     fi
 
     if mountpoint -q /data; then
-        warn "step 1: /data already mounted (unit ordering issue?); skipping resize"
+        warn "step 2: /data already mounted (unit ordering issue?); skipping resize"
         return 0
     fi
 
     disk=$(lsblk -ndo PKNAME "$data_dev" 2>/dev/null || true)
     part_num="${data_dev##*[!0-9]}"
     if [[ -z "$disk" || -z "$part_num" ]]; then
-        err "step 1: could not derive disk/partition from ${data_dev}"
+        err "step 2: could not derive disk/partition from ${data_dev}"
         return 0
     fi
 
-    log "step 1: growing /dev/${disk} partition ${part_num} to 100%"
+    log "step 2: growing /dev/${disk} partition ${part_num} to 100%"
     if ! parted -s "/dev/${disk}" resizepart "${part_num}" 100%; then
         # parted sometimes returns non-zero with a warning when the
         # partition is already at the end; that's benign. Real failure
         # will show up in resize2fs below.
-        warn "step 1: parted resizepart non-zero (possibly benign); continuing"
+        warn "step 2: parted resizepart non-zero (possibly benign); continuing"
     fi
     partprobe "/dev/${disk}" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 
-    log "step 1: resizing ext4 filesystem on ${data_dev}"
+    log "step 2: resizing ext4 filesystem on ${data_dev}"
     if ! resize2fs "${data_dev}"; then
-        err "step 1: resize2fs failed; continuing without resize"
+        err "step 2: resize2fs failed; continuing without resize"
         return 0
     fi
-    log "step 1: data partition + filesystem now fill device"
+    log "step 2: data partition + filesystem now fill device"
 }
 
 # ---------------------------------------------------------------------------
-# Step 2: apply pinned EEPROM config + firmware floor (F9, F14).
+# Step 3: apply pinned EEPROM config + firmware floor (F9, F14).
 #
 # Two halves, both idempotent (no sentinel needed):
 #
@@ -103,16 +241,16 @@ step_eeprom_floor() {
     step_eeprom_floor_only
 }
 
-# Step 2a: EEPROM config (BOOT_ORDER, NET_INSTALL_AT_POWER_ON, BOOT_UART).
+# Step 3a: EEPROM config (BOOT_ORDER, NET_INSTALL_AT_POWER_ON, BOOT_UART).
 step_eeprom_config() {
     local config_file="/boot/firmware/agora-eeprom-config.txt"
 
     if [[ ! -f "$config_file" ]]; then
-        log "step 2a: no EEPROM config at ${config_file}; skipping"
+        log "step 3a: no EEPROM config at ${config_file}; skipping"
         return 0
     fi
     if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
-        warn "step 2a: rpi-eeprom-config not present; skipping config apply"
+        warn "step 3a: rpi-eeprom-config not present; skipping config apply"
         return 0
     fi
 
@@ -120,7 +258,7 @@ step_eeprom_config() {
     local desired
     desired=$(grep -vE '^\s*(#|$)' "$config_file" | grep '=' || true)
     if [[ -z "$desired" ]]; then
-        warn "step 2a: no KEY=VALUE entries in ${config_file}; skipping"
+        warn "step 3a: no KEY=VALUE entries in ${config_file}; skipping"
         return 0
     fi
 
@@ -139,47 +277,47 @@ step_eeprom_config() {
         current_val=$(echo "$current" | awk -F= -v k="$key" '$1==k {print $2; exit}')
         current_val="${current_val// /}"
         if [[ "$current_val" != "$val" ]]; then
-            log "step 2a: EEPROM config ${key} differs (current='${current_val}', desired='${val}')"
+            log "step 3a: EEPROM config ${key} differs (current='${current_val}', desired='${val}')"
             needs_apply=1
         fi
     done <<<"$desired"
 
     if (( needs_apply == 0 )); then
-        log "step 2a: EEPROM config already matches; no apply needed"
+        log "step 3a: EEPROM config already matches; no apply needed"
         return 0
     fi
 
-    log "step 2a: applying EEPROM config from ${config_file}"
-    log "step 2a: NOTE — takes effect on next POWER-CYCLE, not soft-reboot (F14)"
+    log "step 3a: applying EEPROM config from ${config_file}"
+    log "step 3a: NOTE — takes effect on next POWER-CYCLE, not soft-reboot (F14)"
     if ! rpi-eeprom-config --apply "$config_file"; then
-        err "step 2a: rpi-eeprom-config --apply failed; continuing"
+        err "step 3a: rpi-eeprom-config --apply failed; continuing"
         return 0
     fi
 }
 
-# Step 2b: pinned bootloader firmware floor.
+# Step 3b: pinned bootloader firmware floor.
 step_eeprom_floor_only() {
     local floor_file="/boot/firmware/agora-eeprom-floor.txt"
     local floor_ver current_ver
 
     if [[ ! -f "$floor_file" ]]; then
-        log "step 2b: no EEPROM floor file at ${floor_file}; skipping"
+        log "step 3b: no EEPROM floor file at ${floor_file}; skipping"
         return 0
     fi
 
     # Strip comments + blank lines; take the first remaining token.
     floor_ver=$(grep -vE '^\s*(#|$)' "$floor_file" | head -n1 | awk '{print $1}')
     if [[ -z "$floor_ver" || "$floor_ver" == TODO* ]]; then
-        log "step 2b: EEPROM floor is still a placeholder; skipping"
+        log "step 3b: EEPROM floor is still a placeholder; skipping"
         return 0
     fi
 
     if ! command -v vcgencmd >/dev/null 2>&1; then
-        warn "step 2b: vcgencmd not present; skipping floor check"
+        warn "step 3b: vcgencmd not present; skipping floor check"
         return 0
     fi
     if ! command -v rpi-eeprom-update >/dev/null 2>&1; then
-        warn "step 2b: rpi-eeprom-update not present; skipping floor enforcement"
+        warn "step 3b: rpi-eeprom-update not present; skipping floor enforcement"
         return 0
     fi
 
@@ -191,24 +329,24 @@ step_eeprom_floor_only() {
     current_ver=$(vcgencmd bootloader_version 2>/dev/null \
         | awk '/^timestamp /{print $2}' | head -n1)
     if [[ -z "$current_ver" ]]; then
-        warn "step 2b: could not parse current EEPROM timestamp; skipping"
+        warn "step 3b: could not parse current EEPROM timestamp; skipping"
         return 0
     fi
 
     if (( current_ver < floor_ver )); then
-        log "step 2b: EEPROM current=${current_ver} < floor=${floor_ver}; staging update"
-        log "step 2b: NOTE — update takes effect on next POWER-CYCLE, not soft-reboot (F14)"
+        log "step 3b: EEPROM current=${current_ver} < floor=${floor_ver}; staging update"
+        log "step 3b: NOTE — update takes effect on next POWER-CYCLE, not soft-reboot (F14)"
         if ! rpi-eeprom-update -d -a; then
-            err "step 2b: rpi-eeprom-update failed; continuing"
+            err "step 3b: rpi-eeprom-update failed; continuing"
             return 0
         fi
     else
-        log "step 2b: EEPROM current=${current_ver} >= floor=${floor_ver}; no update needed"
+        log "step 3b: EEPROM current=${current_ver} >= floor=${floor_ver}; no update needed"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Step 3: regenerate per-device identity if missing (F11).
+# Step 4: regenerate per-device identity if missing (F11).
 #
 # /etc/machine-id and /etc/ssh/ssh_host_* were stripped from the baked
 # image so every flashed device gets unique identity. systemd-machine-id-setup
@@ -217,24 +355,24 @@ step_eeprom_floor_only() {
 # ---------------------------------------------------------------------------
 step_regen_identity() {
     if [[ ! -s /etc/machine-id ]]; then
-        log "step 3: regenerating /etc/machine-id"
-        systemd-machine-id-setup || warn "step 3: systemd-machine-id-setup failed"
+        log "step 4: regenerating /etc/machine-id"
+        systemd-machine-id-setup || warn "step 4: systemd-machine-id-setup failed"
     else
-        log "step 3: /etc/machine-id already populated; skipping"
+        log "step 4: /etc/machine-id already populated; skipping"
     fi
 
     local existing
     existing=( /etc/ssh/ssh_host_*_key )
     if (( ${#existing[@]} > 0 )); then
-        log "step 3: ssh host keys already present; skipping"
+        log "step 4: ssh host keys already present; skipping"
     else
-        log "step 3: generating ssh host keys (ssh-keygen -A)"
-        ssh-keygen -A || warn "step 3: ssh-keygen -A failed"
+        log "step 4: generating ssh host keys (ssh-keygen -A)"
+        ssh-keygen -A || warn "step 4: ssh-keygen -A failed"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Step 4: ensure systemd-timesyncd is enabled + running (F20).
+# Step 5: ensure systemd-timesyncd is enabled + running (F20).
 #
 # Pi 5 has no RTC battery by default; without NTP a fresh boot lands at
 # epoch 0, breaking TLS handshakes against any backend with a recent cert.
@@ -244,50 +382,52 @@ step_regen_identity() {
 # ---------------------------------------------------------------------------
 step_timesyncd() {
     if systemctl is-enabled systemd-timesyncd.service >/dev/null 2>&1; then
-        log "step 4: systemd-timesyncd already enabled"
+        log "step 5: systemd-timesyncd already enabled"
     else
-        log "step 4: enabling systemd-timesyncd"
-        systemctl enable systemd-timesyncd.service || warn "step 4: enable failed"
+        log "step 5: enabling systemd-timesyncd"
+        systemctl enable systemd-timesyncd.service || warn "step 5: enable failed"
     fi
 
     if systemctl is-active systemd-timesyncd.service >/dev/null 2>&1; then
-        log "step 4: systemd-timesyncd already running"
+        log "step 5: systemd-timesyncd already running"
     else
-        log "step 4: starting systemd-timesyncd"
-        systemctl start systemd-timesyncd.service || warn "step 4: start failed"
+        log "step 5: starting systemd-timesyncd"
+        systemctl start systemd-timesyncd.service || warn "step 5: start failed"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Step 5: write the informational breadcrumb to /data (NOT gating).
+# Step 6: write the informational breadcrumb to /data (NOT gating).
 #
-# We mount /data manually here (after step 1 grew it). systemd's data.mount
-# unit, scheduled for after our unit by local-fs.target, will recognize
-# the existing mount via /proc/self/mountinfo and become a no-op.
+# We mount /data manually here (after step 1 created and step 2 grew it).
+# systemd's data.mount unit, scheduled for after our unit by local-fs.target,
+# will recognize the existing mount via /proc/self/mountinfo and become a
+# no-op.
 # ---------------------------------------------------------------------------
 step_breadcrumb() {
     local marker="/data/.firstboot-done"
 
     if ! mountpoint -q /data; then
-        log "step 5: mounting /data to write breadcrumb"
+        log "step 6: mounting /data to write breadcrumb"
         mkdir -p /data
         if ! mount /data 2>/dev/null; then
-            warn "step 5: could not mount /data (fstab issue?); skipping breadcrumb"
+            warn "step 6: could not mount /data (fstab issue?); skipping breadcrumb"
             return 0
         fi
     fi
 
     if [[ ! -f "$marker" ]]; then
         date -Iseconds > "$marker" 2>/dev/null || true
-        log "step 5: wrote breadcrumb to ${marker}"
+        log "step 6: wrote breadcrumb to ${marker}"
     else
-        log "step 5: breadcrumb already at ${marker} (firstboot has run on this card before)"
+        log "step 6: breadcrumb already at ${marker} (firstboot has run on this card before)"
     fi
 }
 
 # ---------------------------------------------------------------------------
 main() {
     log "starting (idempotent, no sentinel-gate per F5)"
+    step_layout_expand
     step_resize_data
     step_eeprom_floor
     step_regen_identity
