@@ -3,13 +3,26 @@
 # Flow (per Phase 0 plan, D53/D55):
 #   1. Checkout this repo on a GitHub-hosted arm64 runner (D55: no qemu).
 #   2. Clone pi-gen at a pinned SHA, drop our stage-agora overlay into it.
-#   3. Run pi-gen to build a stock Bookworm arm64 rootfs (the overlay is
-#      a no-op placeholder today -- TODO p0-pi-gen-overlay-followup).
+#   3. Run pi-gen via build-docker.sh to build a stock Bookworm arm64
+#      rootfs (the overlay is a no-op placeholder today -- TODO
+#      p0-pi-gen-overlay-followup).
 #   4. Split pi-gen's output .img into boot + rootfs tarballs.
 #   5. Run image-build/assemble.sh to lay out the 5-partition GPT image
 #      with both root slots, EEPROM templates, and dual pubkeys.
 #   6. Sign agora-os-*.img.zst with minisign using MINISIGN_SECRET.
 #   7. Attach .img.zst + .minisig to a draft GitHub Release.
+#
+# This pipeline borrows its pi-gen prelude from sslivins/agora's mature
+# build-image.yml: native arm64 runner (no qemu cross-build), build-docker.sh
+# (container-isolated pi-gen so the host stays clean), 5-min keepalive to
+# survive GHA's silent-job-killer, FIRST_USER_PASS set so pi-gen's
+# stage1/01-sys-tweaks doesn't refuse to build.
+#
+# What we deliberately keep different from agora/build-image.yml:
+#   - DEPLOY_COMPRESSION=none (we losetup the .img immediately to split it).
+#   - Single board for now (matrix-per-board is a separate followup --
+#     would change output filename contract).
+#   - The unique post-pi-gen steps below: split, assemble, minisign, release.
 #
 # Hardening (D53):
 #   - All actions pinned by full SHA.
@@ -33,6 +46,16 @@ on:
 permissions:
   contents: write   # softprops/action-gh-release needs this to create the release
 
+# Don't kick off two concurrent runs for the same tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # NOTE: pinned to RPi-Distro/pi-gen master HEAD as of 2026-04-16.
+  # Bump deliberately by editing this SHA + re-running the workflow.
+  PI_GEN_COMMIT: d2f70c5af1f007626c52f773f8e22209c4a34d38
+
 jobs:
   build:
     name: build + sign agora-os image
@@ -43,25 +66,24 @@ jobs:
       - name: Checkout agora-os
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - name: Install build dependencies
+      - name: Install host dependencies
+        # pi-gen itself runs inside a Docker container (build-docker.sh) so
+        # we don't need debootstrap/quilt/zerofree/libarchive-tools/etc. on
+        # the host. We only install what the *post*-pi-gen steps need:
+        # losetup+mount+tar are in the base image, so the explicit list is
+        # just the partitioning, signing, and EEPROM tools.
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y \
-            quilt parted qemu-utils qemu-user-binfmt debootstrap \
-            libarchive-tools kpartx dosfstools zerofree zip \
-            bsdmainutils libcap2-bin grep rsync xz-utils file git curl \
-            bc gpg pigz xxd arch-test gdisk e2fsprogs zstd minisign \
-            rpi-eeprom
+          sudo apt-get install -y --no-install-recommends \
+            gdisk dosfstools e2fsprogs zstd minisign rpi-eeprom
 
       - name: Clone pi-gen at pinned SHA
-        # NOTE: pinned to RPi-Distro/pi-gen master HEAD as of 2026-04-16.
-        # Bump deliberately by editing this SHA + re-running the workflow.
         run: |
           set -eux
           git clone https://github.com/RPi-Distro/pi-gen.git pi-gen
           cd pi-gen
-          git checkout d2f70c5af1f007626c52f773f8e22209c4a34d38
+          git checkout "${PI_GEN_COMMIT}"
 
       - name: Install stage-agora overlay into pi-gen
         run: |
@@ -82,23 +104,50 @@ jobs:
       - name: Write pi-gen config
         run: |
           set -eux
+          # FIRST_USER_PASS is required by pi-gen's stage1/01-sys-tweaks
+          # unless DISABLE_FIRST_BOOT_USER_RENAME=1 AND no first-boot user
+          # rename happens. Setting both belt-and-suspenders matches what
+          # sslivins/agora's build-image.yml does and keeps pi-gen happy.
+          # Default user is agora/agora; first-boot configuration replaces
+          # this on real deployments via /boot/firmware/agora-fleet.env.
+          # DEPLOY_COMPRESSION=none because the next step losetup-mounts
+          # the .img immediately to split it; xz would just be a detour.
           cat > pi-gen/config <<'EOF'
           IMG_NAME='agora-os-base'
           RELEASE='bookworm'
           TARGET_HOSTNAME='agora'
           FIRST_USER_NAME='agora'
+          FIRST_USER_PASS='agora'
           DISABLE_FIRST_BOOT_USER_RENAME=1
           STAGE_LIST='stage0 stage1 stage2 stage-agora'
           ENABLE_SSH=1
           DEPLOY_COMPRESSION='none'
           EOF
+          echo "--- pi-gen config ---"
+          cat pi-gen/config
 
-      - name: Run pi-gen
-        # pi-gen must run as root for chroot + losetup.
+      - name: Build with pi-gen (build-docker.sh + keepalive)
+        # build-docker.sh runs pi-gen inside a Docker container. The host
+        # stays clean -- no host-side debootstrap, no chroot, no losetup
+        # ownership headaches. Keepalive prints a timestamp every 5 min so
+        # GHA doesn't kill the job for "no output" during long debootstrap
+        # phases. See sslivins/agora/.github/workflows/build-image.yml.
         run: |
           set -eux
           cd pi-gen
-          sudo ./build.sh
+          chmod +x build-docker.sh
+
+          while true; do
+            sleep 300
+            echo "$(date -u '+%H:%M:%S') [keepalive] pi-gen still running..."
+          done &
+          KEEPALIVE_PID=$!
+
+          ./build-docker.sh
+          BUILD_EXIT=$?
+
+          kill $KEEPALIVE_PID 2>/dev/null || true
+          exit $BUILD_EXIT
 
       - name: Locate pi-gen output image
         id: piout
@@ -107,7 +156,7 @@ jobs:
           IMG=$(sudo find pi-gen/deploy -maxdepth 2 -name 'agora-os-base-*.img' | head -n1)
           if [ -z "$IMG" ]; then
             echo "no pi-gen .img produced" >&2
-            sudo ls -la pi-gen/deploy || true
+            sudo ls -laR pi-gen/deploy || true
             exit 1
           fi
           echo "img=${IMG}" >> "$GITHUB_OUTPUT"
