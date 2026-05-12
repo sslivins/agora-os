@@ -227,53 +227,20 @@ step_layout_expand() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2: grow partition 5 (PARTLABEL=data) to fill the device (F8).
+# Step 2: REMOVED in Phase 0.
 #
-# Pre-mount per F8 — unit ordering enforces Before=local-fs.target. Uses
-# `parted resizepart ... 100%` + `resize2fs`, both idempotent:
-#   * parted on an already-100% partition either no-ops or makes a trivial
-#     trailing-sector adjustment.
-#   * resize2fs on an already-max-size ext4 prints "Nothing to do" and
-#     exits 0.
+# Originally step 2 ran `parted resizepart 5 100%` + `resize2fs` to grow
+# /data after the baked image (P1+P2 only) was dd'd onto a larger card.
+# That role no longer exists: step 1's sgdisk creates P5 with
+# `--new=5:0:0`, which always sizes the data partition to fill whatever
+# disk the image is running on — there's nothing for step 2 to do.
+#
+# Keeping the step 2 invocation would: (a) re-run parted on an already-
+# end-of-disk partition (no-op but noisy), and (b) trigger resize2fs to
+# complain "Please run e2fsck first" because the partition geometry
+# parted reports diverges by a sector or two from the freshly-mkfs'd FS,
+# logging a spurious ERROR on every clean boot. So we drop it entirely.
 # ---------------------------------------------------------------------------
-step_resize_data() {
-    local data_dev disk part_num
-
-    data_dev=$(blkid -L data 2>/dev/null) || true
-    if [[ -z "$data_dev" ]]; then
-        warn "step 2: no partition with PARTLABEL=data; skipping resize"
-        return 0
-    fi
-
-    if mountpoint -q /data; then
-        warn "step 2: /data already mounted (unit ordering issue?); skipping resize"
-        return 0
-    fi
-
-    disk=$(lsblk -ndo PKNAME "$data_dev" 2>/dev/null || true)
-    part_num="${data_dev##*[!0-9]}"
-    if [[ -z "$disk" || -z "$part_num" ]]; then
-        err "step 2: could not derive disk/partition from ${data_dev}"
-        return 0
-    fi
-
-    log "step 2: growing /dev/${disk} partition ${part_num} to 100%"
-    if ! parted -s "/dev/${disk}" resizepart "${part_num}" 100%; then
-        # parted sometimes returns non-zero with a warning when the
-        # partition is already at the end; that's benign. Real failure
-        # will show up in resize2fs below.
-        warn "step 2: parted resizepart non-zero (possibly benign); continuing"
-    fi
-    partx -u --nr "${part_num}" "/dev/${disk}" 2>/dev/null || true
-    udevadm settle 2>/dev/null || true
-
-    log "step 2: resizing ext4 filesystem on ${data_dev}"
-    if ! resize2fs "${data_dev}"; then
-        err "step 2: resize2fs failed; continuing without resize"
-        return 0
-    fi
-    log "step 2: data partition + filesystem now fill device"
-}
 
 # ---------------------------------------------------------------------------
 # Step 3: apply pinned EEPROM config + firmware floor (F9, F14).
@@ -515,7 +482,6 @@ main() {
         return 0
     fi
     step_layout_expand
-    step_resize_data
     step_eeprom_floor
     step_regen_identity
     step_timesyncd
