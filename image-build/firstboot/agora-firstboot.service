@@ -1,0 +1,36 @@
+[Unit]
+Description=Agora firstboot: resize data partition, regen identity, apply EEPROM floor
+Documentation=https://github.com/sslivins/agora-os/blob/main/docs/firstboot.md
+
+# Runs in the early-boot window between local-fs-pre.target and
+# local-fs.target so we land BEFORE /etc/fstab is processed — step 1
+# (grow partition 5) MUST run while /data is unmounted (F8 in plan.md).
+# DefaultDependencies=no is required: without it systemd implicitly adds
+# After=basic.target, which is way too late.
+DefaultDependencies=no
+Conflicts=shutdown.target
+After=local-fs-pre.target
+Before=local-fs.target shutdown.target
+
+# Rootfs must be mounted RW (it is, per D57) before our parted/resize2fs
+# steps can write. systemd-remount-fs handles that.
+After=systemd-remount-fs.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agora-firstboot
+RemainAfterExit=yes
+
+# 5 min cap. growpart + resize2fs on a 32 GB card is seconds. Anything
+# slower means something is wedged and we'd rather fail than hang boot.
+TimeoutSec=300
+
+# Mirror to the serial console so a stuck firstboot is visible on a UART
+# capture without journalctl. BOOT_UART=1 is set in eeprom-config.
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+# Pulled in by local-fs.target (not sysinit.target — that would run AFTER
+# fstab mounts have already happened, defeating step 1).
+WantedBy=local-fs.target

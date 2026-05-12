@@ -167,11 +167,24 @@ agora_os_version=TODO
 agora_app_floor=TODO
 EOF
 
-        # TODO(p0-firstboot-service): drop in agora-firstboot.service +
-        # the resize/identity-regen/eeprom-floor-apply unit file here.
+        # agora-firstboot.service: oneshot, idempotent, runs before
+        # local-fs.target so step 1 (grow partition 5) lands while
+        # /data is still unmounted. See docs/firstboot.md.
+        install -d -m 0755 "${R}/usr/local/sbin"
+        install -m 0755 "${HERE}/firstboot/agora-firstboot.sh" \
+            "${R}/usr/local/sbin/agora-firstboot"
+        install -d -m 0755 "${R}/etc/systemd/system"
+        install -m 0644 "${HERE}/firstboot/agora-firstboot.service" \
+            "${R}/etc/systemd/system/agora-firstboot.service"
+        # Enable via local-fs.target.wants (not sysinit.target.wants —
+        # sysinit runs AFTER local-fs.target).
+        install -d -m 0755 "${R}/etc/systemd/system/local-fs.target.wants"
+        ln -sf /etc/systemd/system/agora-firstboot.service \
+            "${R}/etc/systemd/system/local-fs.target.wants/agora-firstboot.service"
 
         # TODO(p0-eeprom-template): drop the eeprom-config and eeprom-floor
-        # files into /boot/firmware/ (they're applied by p0-firstboot-service).
+        # files into /boot/firmware/ (they're consumed by step 2 of
+        # /usr/local/sbin/agora-firstboot).
     done
 }
 
