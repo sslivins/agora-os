@@ -25,8 +25,10 @@ WORK="$(mktemp -d -t agora-os-build.XXXXXX)"
 trap 'cleanup' EXIT
 
 IMG="${WORK}/agora-os.img"
-# 18 GB raw image. Headroom: 2×512MB boot + 2×8GB root + 1GB data seed = 17.5 GB.
-IMG_SIZE_MB=18432
+# Raw image size. Partitions sum to 2×512MB + 2×8GB + 1GB = 18432 MB exactly.
+# We need headroom for (a) the 1 MB GPT-aligned start offset and (b) the
+# backup GPT table at the end of the disk (~17 KB). 32 MB is plenty.
+IMG_SIZE_MB=18464
 
 cleanup() {
     set +e
