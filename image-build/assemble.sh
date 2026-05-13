@@ -230,11 +230,18 @@ finalize_image() {
     # F19 (superseded): the flashable image uses xz, not zstd.
     # Pi Imager + balenaEtcher both read the uncompressed size from the xz
     # footer to render an accurate progress bar; zstd's frame header doesn't
-    # expose that reliably so the progress bar overshoots 1000%+. -T0 uses
-    # every core, which keeps compress time within ~2x of single-thread zstd
-    # on the arm runner. OTA bundles (Phase 2) stay on zstd for fast on-Pi
-    # decompression — that's a different trade-off (D17 unchanged).
-    xz -T0 -9 -f -c "$IMG" > "$OUT_IMG_XZ"
+    # expose that reliably so the progress bar overshoots 1000%+. OTA bundles
+    # (Phase 2) stay on zstd for fast on-Pi decompression — that's a different
+    # trade-off (D17 unchanged).
+    #
+    # Preset -1 (not -9): the image is a one-time-flash artifact, downloaded
+    # rarely and decompressed once per provisioned card. -9 cost ~2-4 min of
+    # CI wall-time to shave ~200 MiB off a ~1 GiB asset; storage/bandwidth on
+    # GitHub Releases is free, so the size delta is non-cost. -1 also has
+    # slightly faster decompression (smaller dict) for Pi Imager and the CMS
+    # imager's recompress pipeline (cms/services/imager.py:467 already uses
+    # xz -1 for the same reason). -T0 uses every core.
+    xz -T0 -1 -f -c "$IMG" > "$OUT_IMG_XZ"
     echo "wrote ${OUT_IMG_XZ}"
 }
 
