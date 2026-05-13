@@ -241,6 +241,29 @@ jobs:
 
           ls -la /tmp/agora-build/
 
+      - name: Reclaim disk space after split
+        # By this point boot.tar + rootfs.tar are sufficient to feed both
+        # assemble.sh and build-bundle.sh; everything else from the pi-gen
+        # build is dead weight (~13 GB on the arm runner). Without this,
+        # assemble.sh ENOSPC's mid-tar-extract on the loopback rootfs.
+        run: |
+          set -eux
+          echo "=== before reclaim ==="
+          df -h /
+          # pi-gen/ holds the entire stage1+stage2+stage-agora work tree
+          # (~10 GB) plus the deploy/ .img we already cp'd to /tmp.
+          sudo rm -rf pi-gen
+          # The cp of pi-gen's .img is no longer needed; we have it split.
+          sudo rm -f /tmp/agora-build/pigen.img
+          # Drop the Docker overlayfs layers from build-docker.sh; the only
+          # thing we needed out of it was pi-gen's deploy/.img, already
+          # extracted and split above. Keeping these around adds another
+          # ~2-4 GB of pressure on /. 'system prune -af' nukes images +
+          # build cache; --volumes also clears any pi-gen named volumes.
+          sudo docker system prune -af --volumes || true
+          echo "=== after reclaim ==="
+          df -h /
+
       - name: Assemble 5-partition agora-os image
         run: |
           set -eux
