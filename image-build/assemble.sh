@@ -5,9 +5,13 @@
 # flashable 2-partition GPT .img.xz per the Phase 0 design.
 #
 # The flashable image ships ONLY boot-A + root-A. agora-firstboot grows
-# root-A from 3 GB to 8 GB and adds boot-B + root-B + data on the device's
-# first boot. This keeps the .img.xz ~600 MB and the SD-card write ~3 min
+# root-A from 5 GB to 8 GB and adds boot-B + root-B + data on the device's
+# first boot. This keeps the .img.xz small and the SD-card write fast,
 # instead of ~15 min for the full 18 GB layout. See docs/firstboot.md.
+#
+# Build-time root-A was originally sized at 3 GB but the stage-agora rootfs
+# (Chromium with HEVC + agora .deb + locales) overflowed 3 GB and ENOSPC'd
+# the tar extract. Bumped to 5 GB to give ~2 GB headroom for future deps.
 #
 # Usage:
 #   assemble.sh <rootfs-tar> <boot-tar> <out-img-xz>
@@ -30,10 +34,10 @@ WORK="$(mktemp -d -t agora-os-build.XXXXXX)"
 trap 'cleanup' EXIT
 
 IMG="${WORK}/agora-os.img"
-# Raw image size. Partitions sum to 512 MB + 3072 MB = 3584 MB. We need
+# Raw image size. Partitions sum to 512 MB + 5120 MB = 5632 MB. We need
 # headroom for (a) the 1 MB GPT-aligned start offset and (b) the backup
 # GPT table at the end of the disk (~17 KB). 16 MB is plenty.
-IMG_SIZE_MB=3600
+IMG_SIZE_MB=5648
 
 cleanup() {
     set +e

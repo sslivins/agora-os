@@ -16,7 +16,7 @@
 #
 # Steps:
 #   1. Expand layout from the ship-time 2-partition image (boot-A + root-A)
-#      to the on-device 5-partition layout: grow root-A from 3 GB to 8 GB,
+#      to the on-device 5-partition layout: grow root-A from 5 GB to 8 GB,
 #      add boot-B (P3, 512 MB), root-B (P4, 8 GB), data (P5, fills card).
 #      Format the new partitions and seed /data (SCHEMA_VERSION=1, /data/var-log/).
 #      Idempotent: short-circuits if P5 already exists. See docs/firstboot.md.
@@ -74,8 +74,8 @@ preflight_tools() {
 # layout.
 #
 # The flashable image is small (~3.5 GB raw, ~600 MB xz) and ships only
-# boot-A (P1, 512 MB) + root-A (P2, 3 GB). This step:
-#   * Grows root-A from 3 GB to 8 GB (online ext4 resize on mounted /).
+# boot-A (P1, 512 MB) + root-A (P2, 5 GB). This step:
+#   * Grows root-A from 5 GB to 8 GB (online ext4 resize on mounted /).
 #   * Adds boot-B (P3, 512 MB), root-B (P4, 8 GB), data (P5, fills card).
 #   * Formats the three new partitions.
 #   * Seeds /data with SCHEMA_VERSION=1 and creates /data/var-log/, /data/agora/.
@@ -134,7 +134,7 @@ step_layout_expand() {
     partx -u "$diskdev" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 
-    # Grow root-A (P2) from 3 GB to 8 GB. Partition 2 starts at 513 MiB
+    # Grow root-A (P2) from 5 GB to 8 GB. Partition 2 starts at 513 MiB
     # (1 MiB GPT start + 512 MiB boot-A); end = 513 + 8192 = 8705 MiB.
     #
     # We use sgdisk (delete + recreate at same start sector) instead of

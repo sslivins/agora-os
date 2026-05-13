@@ -8,14 +8,17 @@
 #
 # The flashable image ships ONLY boot-A + root-A. agora-firstboot expands
 # the partition table on first boot to add boot-B, root-B, and data, and
-# grows root-A from its build-time 3 GB up to the production 8 GB (D52). This
-# keeps the flashable image ~3.5 GB raw (~600 MB compressed) so writing an
-# SD card takes ~3 min instead of ~15 min for the full 18 GB layout.
+# grows root-A from its build-time 5 GB up to the production 8 GB (D52). This
+# keeps the flashable image small (raw + xz-compressed) so writing an SD
+# card stays fast, instead of ~15 min for the full 18 GB layout.
 #
 # IMAGE partition sizes (final on-device layout is documented in
 # docs/firstboot.md):
 #   1  boot-A   512 MB  FAT32 (filesystem made later by assemble.sh)
-#   2  root-A     3 GB  ext4  (agora-firstboot grows to 8 GB)
+#   2  root-A     5 GB  ext4  (agora-firstboot grows to 8 GB)
+#
+# root-A was originally 3 GB but the stage-agora rootfs (Chromium with HEVC
+# + agora .deb + locales) overflowed it. Bumped to 5 GB for headroom.
 
 set -euo pipefail
 
@@ -29,7 +32,7 @@ sgdisk --zap-all "$IMG"
 # the kernel doesn't care about the type code, only PARTLABEL).
 sgdisk \
     --new=1:1MiB:+512MiB    --change-name=1:boot-A  --typecode=1:0700 \
-    --new=2:0:+3072MiB      --change-name=2:root-A  --typecode=2:0700 \
+    --new=2:0:+5120MiB      --change-name=2:root-A  --typecode=2:0700 \
     "$IMG"
 
 # Sanity print so build logs show the final layout.
