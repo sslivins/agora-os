@@ -76,7 +76,7 @@ jobs:
           set -eux
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gdisk dosfstools e2fsprogs xz-utils minisign rpi-eeprom
+            gdisk dosfstools e2fsprogs xz-utils zstd minisign rpi-eeprom python3
 
       - name: Clone pi-gen at pinned SHA
         run: |
@@ -89,10 +89,13 @@ jobs:
         run: |
           set -eux
           cp -r pi-gen-overlay/stage-agora pi-gen/stage-agora
-          # Pi-gen *executes* prerun.sh / 00-run.sh (does not source them),
-          # so they must be +x. The overlay tree's stored git mode may not
-          # carry the exec bit on Windows-authored checkouts; force it here.
-          chmod +x pi-gen/stage-agora/*.sh
+          # Pi-gen *executes* prerun.sh and the per-substage 00-run.sh
+          # files (does not source them), so they must be +x. The overlay
+          # tree's stored git mode may not carry the exec bit on
+          # Windows-authored checkouts; force it across the whole stage
+          # (both flat scripts and substage scripts) with find so an empty
+          # match doesn't fail under `set -e`.
+          find pi-gen/stage-agora -name '*.sh' -exec chmod +x {} +
           # Mark this stage as the export point -- pi-gen will build a .img
           # from its rootfs. Earlier stages do not run export-image.
           touch pi-gen/stage-agora/EXPORT_IMAGE
@@ -219,6 +222,23 @@ jobs:
           sudo ls -la /tmp/agora-build/
           echo "OUT_IMG_XZ=${OUT_IMG_XZ}" >> "$GITHUB_ENV"
 
+      - name: Build OTA bundle
+        # Consumes the exact same boot.tar + rootfs.tar that assemble.sh
+        # used (D62) — they're still on disk in /tmp/agora-build/. The
+        # bundle producer strips /etc/machine-id and /etc/ssh/ssh_host_*
+        # from rootfs.tar before packing (D63); the apply-time D60 copy
+        # step on the device re-instates the device's own identity.
+        run: |
+          set -eux
+          OUT_BUNDLE="/tmp/agora-build/agora-bundle-${GITHUB_REF_NAME:-dev}.tar.zst"
+          image-build/build-bundle.sh \
+            /tmp/agora-build/rootfs.tar \
+            /tmp/agora-build/boot.tar \
+            "${GITHUB_REF_NAME:-dev}" \
+            "$OUT_BUNDLE"
+          ls -la /tmp/agora-build/
+          echo "OUT_BUNDLE=${OUT_BUNDLE}" >> "$GITHUB_ENV"
+
       - name: Sign image with minisign
         # MINISIGN_SECRET is the full contents of the minisign .key file
         # (generated offline via `minisign -G -W ...`, paper-backed, then
@@ -239,18 +259,52 @@ jobs:
           # -W => key has no password, signing is non-interactive.
           # We add a trusted comment with the tag for forensic clarity.
           TAG="${GITHUB_REF_NAME:-dev}"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           minisign -S -W \
             -s "$KEYFILE" \
-            -t "agora-os ${TAG} built by GH Actions on $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t "agora-os ${TAG} built by GH Actions on ${BUILT_AT}" \
             -m "$OUT_IMG_XZ"
+          # Sign the OTA bundle with the same keypair — devices verify
+          # against the same /etc/agora/update-pubkey.pem baked into their
+          # rootfs by assemble.sh.
+          minisign -S -W \
+            -s "$KEYFILE" \
+            -t "agora-bundle ${TAG} built by GH Actions on ${BUILT_AT}" \
+            -m "$OUT_BUNDLE"
           shred -u "$KEYFILE" || rm -f "$KEYFILE"
           sudo ls -la "$(dirname "$OUT_IMG_XZ")"
+
+      - name: Smoke-test signatures against committed pubkey
+        # This is the cross-repo sanity check: confirm the MINISIGN_SECRET
+        # baked into agora-os's GH Actions matches the public key
+        # committed at image-build/update-pubkey.pem (and therefore baked
+        # into the rootfs by assemble.sh, and therefore the key the
+        # device-side verifier will use to check OTA bundles).
+        #
+        # A mismatch is silent and catastrophic — every OTA in the fleet
+        # would fail with a generic "bad signature" that's painful to
+        # debug from telemetry alone. Catching it here means the release
+        # never gets cut.
+        #
+        # We verify both artifacts because they share the same keypair:
+        # if either passes the other will too, but checking both keeps
+        # the failure mode unambiguous when one is corrupted in transit.
+        run: |
+          set -eux
+          minisign -V \
+            -p image-build/update-pubkey.pem \
+            -m "$OUT_IMG_XZ"
+          minisign -V \
+            -p image-build/update-pubkey.pem \
+            -m "$OUT_BUNDLE"
+          echo "smoke test: image + bundle both verify against committed update-pubkey.pem"
 
       - name: Compute checksums
         run: |
           set -eux
           cd "$(dirname "$OUT_IMG_XZ")"
           sha256sum "$(basename "$OUT_IMG_XZ")" > "$(basename "$OUT_IMG_XZ").sha256"
+          # The bundle's .sha256 is already emitted by build-bundle.sh.
 
       - name: Create draft release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -262,3 +316,6 @@ jobs:
             /tmp/agora-build/agora-os-*.img.xz
             /tmp/agora-build/agora-os-*.img.xz.minisig
             /tmp/agora-build/agora-os-*.img.xz.sha256
+            /tmp/agora-build/agora-bundle-*.tar.zst
+            /tmp/agora-build/agora-bundle-*.tar.zst.minisig
+            /tmp/agora-build/agora-bundle-*.tar.zst.sha256
