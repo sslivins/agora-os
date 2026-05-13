@@ -66,6 +66,44 @@ jobs:
       - name: Checkout agora-os
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
+      - name: Free disk space on runner
+        # pi-gen's debootstrap + Docker layers can balloon past the
+        # ~30 GB of free space ubuntu-24.04-arm ships with -- run #25821558614
+        # blew up extracting ca-certificates from stage1 with "No space left
+        # on device". Reclaim the pre-installed toolchains we don't use so
+        # pi-gen's stage tarballs have room to land.
+        #
+        # All paths guarded with `|| true` because the exact set of
+        # pre-installed toolchains varies by runner image version + arch;
+        # on arm64 most of these are smaller-or-absent vs x64. The `df -h`
+        # bookends give us a paper trail if a future image change wipes out
+        # one of these directories and the gain shrinks.
+        run: |
+          set -eux
+          echo "--- disk before cleanup ---"
+          df -h /
+          # Big-ticket toolchains we never touch.
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/share/swift || true
+          sudo rm -rf /opt/microsoft || true
+          # Hosted toolcache for languages we don't use in this pipeline
+          # (Node, Python, Ruby, Go, .NET). pi-gen runs entirely inside
+          # Docker, so the host runner does not need any of these.
+          sudo rm -rf /opt/hostedtoolcache/node || true
+          sudo rm -rf /opt/hostedtoolcache/Ruby || true
+          sudo rm -rf /opt/hostedtoolcache/go || true
+          sudo rm -rf /opt/hostedtoolcache/PyPy || true
+          # Trim APT caches; we only need the packages installed by the next
+          # step, not the lists/archives that came with the runner image.
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          echo "--- disk after cleanup ---"
+          df -h /
+
       - name: Install host dependencies
         # pi-gen itself runs inside a Docker container (build-docker.sh) so
         # we don't need debootstrap/quilt/zerofree/libarchive-tools/etc. on
