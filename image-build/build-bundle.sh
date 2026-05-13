@@ -32,6 +32,15 @@
 
 set -euo pipefail
 
+# Must run as root: rootfs.tar contains /dev/* character devices and
+# `tar -xf` needs CAP_MKNOD to recreate them. Mirror of assemble.sh's
+# root check; without this the extract fails opaquely on the first
+# device-node entry. Local rehearsal: `sudo image-build/build-bundle.sh ...`
+if [[ $EUID -ne 0 ]]; then
+    echo "build-bundle.sh: must run as root (tar -xf needs CAP_MKNOD for /dev/* nodes)." >&2
+    exit 1
+fi
+
 ROOTFS_TAR="${1:?usage: build-bundle.sh <rootfs-tar> <boot-tar> <version> <out-bundle.tar.zst>}"
 BOOT_TAR="${2:?usage: build-bundle.sh <rootfs-tar> <boot-tar> <version> <out-bundle.tar.zst>}"
 VERSION="${3:?usage: build-bundle.sh <rootfs-tar> <boot-tar> <version> <out-bundle.tar.zst>}"

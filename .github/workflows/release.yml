@@ -289,14 +289,26 @@ jobs:
         # bundle producer strips /etc/machine-id and /etc/ssh/ssh_host_*
         # from rootfs.tar before packing (D63); the apply-time D60 copy
         # step on the device re-instates the device's own identity.
+        #
+        # Runs under sudo for the same reason assemble.sh does: rootfs.tar
+        # contains /dev/* character devices and `tar -xf` requires
+        # CAP_MKNOD to recreate them. Without sudo the extract fails with
+        # "Cannot mknod: Operation not permitted" on the first device
+        # entry (./dev/ptmx). D62 also requires the bundle's root/ tree
+        # to be byte-identical to assemble.sh's slot A — which means we
+        # must preserve the static /dev/* nodes, not skip them with
+        # --exclude. After the script runs we hand /tmp/agora-build back
+        # to the runner user so the subsequent (unprivileged) minisign
+        # step can write the sibling .minisig.
         run: |
           set -eux
           OUT_BUNDLE="/tmp/agora-build/agora-bundle-${GITHUB_REF_NAME:-dev}.tar.zst"
-          image-build/build-bundle.sh \
+          sudo image-build/build-bundle.sh \
             /tmp/agora-build/rootfs.tar \
             /tmp/agora-build/boot.tar \
             "${GITHUB_REF_NAME:-dev}" \
             "$OUT_BUNDLE"
+          sudo chown -R "$(id -u):$(id -g)" /tmp/agora-build
           ls -la /tmp/agora-build/
           echo "OUT_BUNDLE=${OUT_BUNDLE}" >> "$GITHUB_ENV"
 
