@@ -188,16 +188,42 @@ step_layout_expand() {
     # view; partx -u alone won't pick up previously-unknown partitions.
     partx -a "$diskdev" 2>/dev/null || true
 
-    # Wipe any stale filesystem signatures on the freshly-created partitions
-    # BEFORE `udevadm settle` runs udev's blkid probe. If a leftover ext4
-    # superblock with LABEL=data lives in those sectors (e.g. from a prior
-    # live-test cycle, since flashing a 2-partition image doesn't touch the
-    # sectors past P2), udev publishes it to systemd-fstab-generator, which
-    # then auto-fires the `nofail` data.mount unit out-of-order with respect
-    # to local-fs.target. The mount or its systemd-fsck holds the partition
-    # busy and the subsequent mkfs.ext4 fails with "is apparently in use".
-    # Wiping by raw kernel device name avoids relying on the by-partlabel/
-    # symlinks (which only appear after udev runs).
+    # Tear down any stale mounts on /data and the /var/log bind mount BEFORE
+    # touching the partitions. Why this order matters:
+    #
+    # On a dev/test reflash, sectors past P2 keep their old ext4 superblock
+    # because Rufus/dd only writes the first ~8.5 GiB. If P5 already exists
+    # in the GPT (e.g. left over from a prior cycle), systemd-fstab-generator
+    # has already generated data.mount + var-log.mount + a systemd-fsck unit
+    # at boot time from /etc/fstab. By the time firstboot.service runs:
+    #   - systemd-fsck@dev-disk-by\x2dpartlabel-data has run (and possibly
+    #     repaired) the stale ext4 fs on P5
+    #   - data.mount has mounted P5 on /data
+    #   - var-log.mount has bind-mounted /var/log -> /data/var-log
+    # The bind mount holds /data busy, so a naive `umount /data` fails with
+    # EBUSY, and a subsequent wipefs / mkfs.ext4 also fails with "device is
+    # in use". We must stop var-log.mount FIRST to release the bind, then
+    # data.mount, then unmount any stragglers. Lazy umount handles the case
+    # where journald (or something else under /var/log) still holds a file
+    # descriptor open; the fd will dangle until those processes exit, which
+    # is fine because firstboot is about to recreate the filesystem anyway.
+    #
+    # All steps are best-effort: on a clean factory flash where P3/P4/P5
+    # didn't exist before this very sgdisk call, none of these units ever
+    # fired, and every stop / umount returns non-zero. The || true keeps
+    # the script flowing.
+    systemctl stop var-log.mount 2>/dev/null || true
+    systemctl stop data.mount 2>/dev/null || true
+    umount -l /var/log 2>/dev/null || true
+    umount -l /data 2>/dev/null || true
+    umount -l /dev/disk/by-partlabel/data 2>/dev/null || true
+
+    # Now that /data is released, wipe any stale filesystem signatures on
+    # the freshly-(re)created partitions so udev's next blkid probe finds
+    # nothing to republish. Wiping by raw kernel device name avoids relying
+    # on the by-partlabel/ symlinks (which only appear after udev runs and
+    # whose target device may still be in a half-released state right after
+    # the lazy umount above).
     for partdev in "${diskdev}p3" "${diskdev}p4" "${diskdev}p5"; do
         if [[ -b "$partdev" ]]; then
             wipefs -a "$partdev" 2>/dev/null || true
@@ -205,13 +231,13 @@ step_layout_expand() {
     done
     udevadm settle 2>/dev/null || true
 
-    # Belt-and-suspenders: even with the wipefs above, if data.mount somehow
-    # fired anyway (race between wipefs and udev), stop it and unmount before
-    # mkfs. systemctl stop is best-effort; the unit may not exist on a fresh
-    # boot, which is fine.
+    # Belt-and-suspenders: if udev managed to republish a signature between
+    # the wipefs above and `settle` returning (or if data.mount somehow
+    # got re-armed by a generator re-run), stop it again before mkfs.
+    systemctl stop var-log.mount 2>/dev/null || true
     systemctl stop data.mount 2>/dev/null || true
-    umount /data 2>/dev/null || true
-    umount /dev/disk/by-partlabel/data 2>/dev/null || true
+    umount -l /data 2>/dev/null || true
+    umount -l /dev/disk/by-partlabel/data 2>/dev/null || true
 
     # Format the three new partitions. -F forces mkfs.ext4 past its
     # "this looks like a partition table" sanity check (a fresh GPT entry
