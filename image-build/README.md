@@ -255,8 +255,32 @@ re-read this section.
 You should never invoke `minisign` by hand for production builds. The
 release workflow does it: pulls `MINISIGN_SECRET` from Actions secrets,
 writes it to a tmpfs file with `umask 077`, calls
-`minisign -S -W -s $KEY_FILE -t "agora-os <tag>" -m <img>`, then shreds
-the file. The key never lands on disk outside that ephemeral path.
+`minisign -S -W -s $KEY_FILE -t "agora-os <tag>" -m <img>` once for the
+`.img.xz` and once for the OTA bundle `.tar.zst` (Phase 2), then shreds
+the keyfile. The key never lands on disk outside that ephemeral path.
+
+Both artifacts are signed with the **primary** keypair. Devices verify
+the OTA bundle against `/etc/agora/update-pubkey.pem` baked into their
+rootfs by `assemble.sh`, so the keypair sitting in `MINISIGN_SECRET`
+*must* match the pubkey committed at `image-build/update-pubkey.pem`.
+
+A mismatch is silent and catastrophic in production — every OTA in the
+fleet fails with a generic "bad signature" that's painful to debug
+from telemetry alone. To prevent that class of bug, the release
+workflow runs a **smoke-test step** after signing: it calls
+`minisign -V -p image-build/update-pubkey.pem -m <artifact>` against
+both the signed image and the signed bundle. If either fails to
+verify against the committed pubkey, the release is not cut. The cost
+is a few seconds per release; the upside is that a `MINISIGN_SECRET`
+↔ pubkey desync is caught before any device ever sees it.
+
+If the smoke-test ever fails, **do not "fix" by rotating either
+side without thinking**. The likely failure modes are: (a) someone
+edited `MINISIGN_SECRET` without updating the committed pubkey
+(rotate the secret back, or run the rotation ceremony in §4.4); or
+(b) `image-build/update-pubkey.pem` was overwritten in a PR (revert
+the PR, never rotate to match a corrupted pubkey). Rotating the
+production keypair is a §4.4 ceremony — never a CI fix-up.
 
 ### 4.4 Recovery ceremony (D54, break-glass)
 

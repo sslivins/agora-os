@@ -148,13 +148,31 @@ customize_rootfs() {
         "${R}/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service"
 
     # Signing pubkeys for OTA bundle verification (D54).
+    #
+    # The real primary + recovery pubkeys are committed in this directory
+    # and baked into the rootfs verbatim — there is NO build-time
+    # substitution step. Rationale:
+    #   - The signing keypair is permanent for the lifetime of the fleet
+    #     (D54): rotating it requires a multi-release dance that itself
+    #     depends on the *current* baked pubkey being trusted by every
+    #     fielded device. There's nothing CI can substitute that the repo
+    #     can't just commit.
+    #   - The earlier .example placeholder design (with a TODO that no CI
+    #     step ever fulfilled) silently shipped invalid pubkeys into the
+    #     rootfs, breaking every OTA verify. The audit trail is in commit
+    #     4fe4f59 ("Bake primary + recovery signing pubkeys").
+    # The .example files remain in the repo as documentation of the
+    # format; they are NOT installed.
     mkdir -p "${R}/etc/agora"
-    # TODO(p0-release-pipeline): these are committed as .example files;
-    # CI substitutes the real pubkeys at build time.
-    install -m 0644 "${HERE}/update-pubkey.pem.example" \
+    install -m 0644 "${HERE}/update-pubkey.pem" \
         "${R}/etc/agora/update-pubkey.pem"
-    install -m 0644 "${HERE}/update-pubkey-recovery.pem.example" \
+    install -m 0644 "${HERE}/update-pubkey-recovery.pem" \
         "${R}/etc/agora/update-pubkey-recovery.pem"
+    # Rotation slot (Phase 2): the on-device verifier scans
+    # /etc/agora/update-pubkeys.d/*.pem in addition to the two named
+    # pubkeys above. Ship the directory empty so a future release can
+    # drop a new key in without touching the verifier code.
+    mkdir -p "${R}/etc/agora/update-pubkeys.d"
 
     # Version file (F17, Decision #2).
     # TODO(p0-release-pipeline): CI substitutes the real values.
