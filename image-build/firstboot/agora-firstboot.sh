@@ -187,7 +187,31 @@ step_layout_expand() {
     # partx -a adds newly-discovered partitions (P3/P4/P5) to the kernel's
     # view; partx -u alone won't pick up previously-unknown partitions.
     partx -a "$diskdev" 2>/dev/null || true
+
+    # Wipe any stale filesystem signatures on the freshly-created partitions
+    # BEFORE `udevadm settle` runs udev's blkid probe. If a leftover ext4
+    # superblock with LABEL=data lives in those sectors (e.g. from a prior
+    # live-test cycle, since flashing a 2-partition image doesn't touch the
+    # sectors past P2), udev publishes it to systemd-fstab-generator, which
+    # then auto-fires the `nofail` data.mount unit out-of-order with respect
+    # to local-fs.target. The mount or its systemd-fsck holds the partition
+    # busy and the subsequent mkfs.ext4 fails with "is apparently in use".
+    # Wiping by raw kernel device name avoids relying on the by-partlabel/
+    # symlinks (which only appear after udev runs).
+    for partdev in "${diskdev}p3" "${diskdev}p4" "${diskdev}p5"; do
+        if [[ -b "$partdev" ]]; then
+            wipefs -a "$partdev" 2>/dev/null || true
+        fi
+    done
     udevadm settle 2>/dev/null || true
+
+    # Belt-and-suspenders: even with the wipefs above, if data.mount somehow
+    # fired anyway (race between wipefs and udev), stop it and unmount before
+    # mkfs. systemctl stop is best-effort; the unit may not exist on a fresh
+    # boot, which is fine.
+    systemctl stop data.mount 2>/dev/null || true
+    umount /data 2>/dev/null || true
+    umount /dev/disk/by-partlabel/data 2>/dev/null || true
 
     # Format the three new partitions. -F forces mkfs.ext4 past its
     # "this looks like a partition table" sanity check (a fresh GPT entry
