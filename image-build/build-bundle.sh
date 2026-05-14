@@ -46,6 +46,14 @@ BOOT_TAR="${2:?usage: build-bundle.sh <rootfs-tar> <boot-tar> <version> <out-bun
 VERSION="${3:?usage: build-bundle.sh <rootfs-tar> <boot-tar> <version> <out-bundle.tar.zst>}"
 OUT_BUNDLE="${4:?usage: build-bundle.sh <rootfs-tar> <boot-tar> <version> <out-bundle.tar.zst>}"
 
+# Belt-and-suspenders v-prefix strip. release.yml passes ${GITHUB_REF_NAME#v}
+# so a tag-driven build is already clean, but manual / local rebundles
+# routinely pass the raw tag (e.g. "v0.0.7-test"). The device-side
+# dispatch validator (pydantic) rejects a meta.json version that starts
+# with "v", which produces a hard-to-diagnose "bad signature"-shaped
+# error on apply.
+VERSION="${VERSION#v}"
+
 # /etc/agora/version contents (F17, Decision #2). Same env-var contract
 # as assemble.sh — both scripts run in the same release.yml job so the
 # values are always in sync. Without this block, an OTA-applied slot B
@@ -55,6 +63,10 @@ OUT_BUNDLE="${4:?usage: build-bundle.sh <rootfs-tar> <boot-tar> <version> <out-b
 # also bake in for slot B).
 : "${AGORA_OS_VERSION:?AGORA_OS_VERSION env var required (e.g. '0.0.4-test'); release.yml sets this from \${GITHUB_REF_NAME#v}}"
 : "${AGORA_APP_FLOOR:?AGORA_APP_FLOOR env var required (e.g. '1.11.0'); release.yml sets this from image-build/agora-app-floor.txt}"
+
+# Same v-prefix defense as VERSION above. release.yml already strips,
+# but local / manual rebundle invocations regularly forget.
+AGORA_OS_VERSION="${AGORA_OS_VERSION#v}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -79,10 +91,16 @@ ZSTD_LEVEL=19
 ZSTD_WINDOW_LOG=27
 
 # min_from_version: floor that the device's current version must satisfy
-# to accept this bundle (Phase 2 #21). Empty string here ⇒ "no floor"
-# semantics in the verifier. We bake it from the optional
-# MIN_FROM_VERSION env var; release.yml can set this per-tag if needed.
-MIN_FROM_VERSION="${MIN_FROM_VERSION:-}"
+# to accept this bundle (Phase 2 #21). We default to "0.0.0" rather than
+# empty so meta.json always has a real floor string: the device-side
+# bundle verifier (os_updater/bundle.py) treats a NULL/missing
+# min_from_version as a hard rejection ("strict-key check"), and any
+# semver >= 0.0.0 is automatically every shipped version, so this is a
+# no-op floor when the env var isn't set. release.yml overrides per-tag
+# when an actual floor is needed.
+MIN_FROM_VERSION="${MIN_FROM_VERSION:-0.0.0}"
+# Strip optional v-prefix here too, same rationale as VERSION above.
+MIN_FROM_VERSION="${MIN_FROM_VERSION#v}"
 
 # Schema version of the bundle layout itself (Phase 2 #22). Bumped when
 # we add fields to meta.json, change tarball structure, or change the
