@@ -126,6 +126,25 @@ tar -xf "$BOOT_TAR" -C "${WORK}/bundle/boot"
 echo "build-bundle: extracting rootfs tarball..."
 tar -xf "$ROOTFS_TAR" -C "${WORK}/bundle/root"
 
+# Substitute the agora cmdline for the pi-gen stock cmdline (bug #17).
+#
+# pi-gen's stock /boot/firmware/cmdline.txt for Bookworm Lite ships with
+# `init=/usr/lib/raspi-config/init_resize.sh` (the first-flash resize
+# trigger). On an OTA-applied slot B this script runs at boot, tries to
+# grow the rootfs partition, and remounts root read-only mid-flow — slot
+# B comes up technically booted (cmdline=root=PARTLABEL=root-B) but
+# functionally dead (all 4 agora services fail, /data fails to mount).
+#
+# apply.py's rewrite_cmdline only strips the root= token and force-
+# appends `rw`; it preserves all other tokens (including the resize
+# trigger). The function was written assuming the bundle's cmdline came
+# from agora-os's cmdline-B.txt template — which is what THIS step
+# enforces.
+#
+# This mirrors assemble.sh's write_boot_config which installs
+# cmdline-A.txt for slot A.
+install -m 0644 "${HERE}/cmdline-B.txt" "${WORK}/bundle/boot/cmdline.txt"
+
 # ---------------------------------------------------------------------------
 # Step 2: apply shared rootfs customizations.
 #
