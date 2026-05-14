@@ -272,7 +272,20 @@ jobs:
           # masquerade as a real assemble failure.
           chmod +x image-build/*.sh image-build/firstboot/*.sh
           OUT_IMG_XZ="/tmp/agora-build/agora-os-${GITHUB_REF_NAME:-dev}.img.xz"
-          sudo image-build/assemble.sh \
+          # AGORA_OS_VERSION: strip the leading 'v' from refs like 'v0.0.4-test'
+          # so /etc/agora/version reads '0.0.4-test', matching semver-shape.
+          # AGORA_APP_FLOOR: operator-managed floor pinned in the committed
+          # image-build/agora-app-floor.txt — bump when shipping a rootfs
+          # whose contract requires a newer agora-app. Pass values through
+          # sudo explicitly (sudo strips env by default; explicit assignment
+          # is safer than relying on sudoers env_keep config).
+          AGORA_OS_VERSION="${GITHUB_REF_NAME#v}"
+          AGORA_OS_VERSION="${AGORA_OS_VERSION:-dev}"
+          AGORA_APP_FLOOR="$(cat image-build/agora-app-floor.txt)"
+          sudo \
+            AGORA_OS_VERSION="$AGORA_OS_VERSION" \
+            AGORA_APP_FLOOR="$AGORA_APP_FLOOR" \
+            image-build/assemble.sh \
             /tmp/agora-build/rootfs.tar \
             /tmp/agora-build/boot.tar \
             "$OUT_IMG_XZ"
@@ -303,7 +316,17 @@ jobs:
         run: |
           set -eux
           OUT_BUNDLE="/tmp/agora-build/agora-bundle-${GITHUB_REF_NAME:-dev}.tar.zst"
-          sudo image-build/build-bundle.sh \
+          # Same env-var contract as the assemble.sh step above. Both
+          # scripts run in this single job so they share one source of
+          # truth for the version + app-floor values (D62 byte-parity
+          # between slot A and slot B).
+          AGORA_OS_VERSION="${GITHUB_REF_NAME#v}"
+          AGORA_OS_VERSION="${AGORA_OS_VERSION:-dev}"
+          AGORA_APP_FLOOR="$(cat image-build/agora-app-floor.txt)"
+          sudo \
+            AGORA_OS_VERSION="$AGORA_OS_VERSION" \
+            AGORA_APP_FLOOR="$AGORA_APP_FLOOR" \
+            image-build/build-bundle.sh \
             /tmp/agora-build/rootfs.tar \
             /tmp/agora-build/boot.tar \
             "${GITHUB_REF_NAME:-dev}" \
