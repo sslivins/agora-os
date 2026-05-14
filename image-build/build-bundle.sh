@@ -233,7 +233,20 @@ BUNDLE_TAR="${WORK}/bundle.tar"
     cd "${WORK}/bundle"
     # Explicit ordering matches reader expectations and keeps the
     # diff between two builds stable.
-    tar --sort=name --owner=0 --group=0 --numeric-owner -cf "$BUNDLE_TAR" \
+    # NOTE: do NOT pass --owner=0 --group=0 here. Those flags overwrite
+    # the real uid/gid of every entry with 0/0, which destroys ownership
+    # of user-owned paths (most importantly /home/agora, which the agora
+    # systemd units run as). The .img.xz path (assemble.sh) does a block
+    # copy from the pi-gen rootfs and so escapes this; the bundle path
+    # used to share the same wrong tarball flags as apply.py's extractor
+    # (`--no-same-owner --no-same-permissions`) which masked the damage
+    # by also discarding ownership on the device. PR #188 fixed the
+    # extractor side; this is the matching producer-side fix so the
+    # bundle actually carries the correct uid/gid into slot B.
+    # --numeric-owner is kept on purpose: it stores uid/gid as numbers,
+    # which is what the device's /etc/passwd resolves (agora=1000) and
+    # keeps the build deterministic across hosts.
+    tar --sort=name --numeric-owner -cf "$BUNDLE_TAR" \
         boot root meta.json
 )
 
