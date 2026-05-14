@@ -69,6 +69,17 @@ install -m 0644 "${HERE}/logrotate-agora.conf" \
 # /var/log bind-mount target (D56). fstab.template points at it.
 mkdir -p "${R}/var/log"
 
+# /data mountpoint. fstab.template mounts PARTLABEL=data here; without
+# this directory, data.mount fails with `mount: /data: mount point does
+# not exist` and the /var/log bind-mount, /opt/agora/state, and
+# /opt/agora/persist binds cascade-fail along with it. On the slot-A
+# image path this masked itself because agora-firstboot creates the
+# data partition and the dir survives via a kernel auto-mkdir on some
+# kernels; on the OTA-applied slot-B path the dir was always missing
+# and slot B booted with /data unmounted (cascade failure of all 4
+# services). Bug #16.
+mkdir -p "${R}/data"
+
 # Strip per-device identity (F11, D63). On the slot-A flash path
 # agora-firstboot regenerates these; on the OTA-apply path the D60
 # fleet-state copy step in agora's os_updater/apply.py copies them
