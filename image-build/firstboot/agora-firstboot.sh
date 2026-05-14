@@ -249,7 +249,7 @@ step_layout_expand() {
     if ! mkfs.ext4 -F -L root-B /dev/disk/by-partlabel/root-B; then
         err "step 1: mkfs.ext4 root-B failed; continuing"
     fi
-    if ! mkfs.ext4 -F -L data /dev/disk/by-partlabel/data; then
+    if ! mkfs.ext4 -F -F -L data /dev/disk/by-partlabel/data; then
         err "step 1: mkfs.ext4 data failed; aborting seed"
         return 0
     fi
@@ -267,8 +267,8 @@ step_layout_expand() {
         return 0
     fi
     echo 1 > "${seed_mnt}/SCHEMA_VERSION"
-    mkdir -p "${seed_mnt}/var-log" "${seed_mnt}/agora"
-    chmod 0755 "${seed_mnt}/var-log" "${seed_mnt}/agora"
+    mkdir -p "${seed_mnt}/var-log" "${seed_mnt}/agora" "${seed_mnt}/agora/state" "${seed_mnt}/agora/persist"
+    chmod 0755 "${seed_mnt}/var-log" "${seed_mnt}/agora" "${seed_mnt}/agora/state" "${seed_mnt}/agora/persist"
     sync
     umount "$seed_mnt"
     rmdir "$seed_mnt" 2>/dev/null || true
@@ -475,6 +475,81 @@ step_timesyncd() {
 # Step 6: write the informational breadcrumb to /data (NOT gating).
 #
 # We mount /data manually here (after step 1 created and step 2 grew it).
+# ---------------------------------------------------------------------------
+# Step 6: seed /data with /opt/agora/state and /opt/agora/persist content
+# (bug os-bug-v002-state-on-rootfs).
+#
+# fstab on a v0.0.3+ image bind-mounts /data/agora/state -> /opt/agora/state
+# and /data/agora/persist -> /opt/agora/persist so device identity, CMS
+# pairing, the provisioned marker etc. survive an A/B slot flip. But on a
+# fresh card those /data/agora/{state,persist} directories are empty seed
+# dirs (step 1 created them but didn't populate them), and the rootfs slot
+# carries any seed content shipped with the image plus anything written by
+# package post-install scripts on first boot. We copy that into /data BEFORE
+# local-fs.target activates the bind mounts. After the binds activate the
+# rootfs dirs are masked and any further writes go to /data.
+#
+# Sentinel /data/.state-migrated makes this one-shot per card. We also
+# short-circuit if the dirs are already mountpoints (shouldn't happen during
+# firstboot since we run Before=local-fs.target, but belt-and-suspenders for
+# the manual-re-run case).
+# ---------------------------------------------------------------------------
+step_state_migrate() {
+    local sentinel="/data/.state-migrated"
+
+    if ! mountpoint -q /data; then
+        log "step 6: mounting /data for state migration"
+        mkdir -p /data
+        if ! mount /data 2>/dev/null; then
+            warn "step 6: could not mount /data (fstab issue?); skipping state migration"
+            return 0
+        fi
+    fi
+
+    if [[ -f "$sentinel" ]]; then
+        log "step 6: ${sentinel} present; state already migrated, skipping"
+        return 0
+    fi
+
+    if mountpoint -q /opt/agora/state || mountpoint -q /opt/agora/persist; then
+        log "step 6: /opt/agora/{state,persist} already a mountpoint; binds active before migration ran, just stamping sentinel"
+        touch "$sentinel" 2>/dev/null || true
+        return 0
+    fi
+
+    mkdir -p /data/agora/state /data/agora/persist
+    chmod 0755 /data/agora/state /data/agora/persist
+
+    if [[ -d /opt/agora/state ]]; then
+        log "step 6: copying /opt/agora/state -> /data/agora/state"
+        cp -a /opt/agora/state/. /data/agora/state/ 2>/dev/null || \
+            warn "step 6: cp /opt/agora/state -> /data/agora/state returned non-zero; continuing"
+    else
+        log "step 6: /opt/agora/state not present in rootfs; skipping copy (just creating /data target)"
+    fi
+
+    if [[ -d /opt/agora/persist ]]; then
+        log "step 6: copying /opt/agora/persist -> /data/agora/persist"
+        cp -a /opt/agora/persist/. /data/agora/persist/ 2>/dev/null || \
+            warn "step 6: cp /opt/agora/persist -> /data/agora/persist returned non-zero; continuing"
+    else
+        log "step 6: /opt/agora/persist not present in rootfs; skipping copy (just creating /data target)"
+    fi
+
+    sync
+    touch "$sentinel" 2>/dev/null || true
+    log "step 6: state migration complete, sentinel written"
+}
+
+# ---------------------------------------------------------------------------
+# Step 7: write breadcrumb to /data marking firstboot complete on this card.
+# Informational only — every step is idempotent and runs unconditionally;
+# this is for human debugging / post-mortem.
+#
+# Mounting /data here is also a smoke test of fstab. If the breadcrumb path
+# refuses to mount we want to know in the log even though the script returns
+# 0 (per F5: firstboot is not gated on this).
+#
 # systemd's data.mount unit, scheduled for after our unit by local-fs.target,
 # will recognize the existing mount via /proc/self/mountinfo and become a
 # no-op.
@@ -483,19 +558,19 @@ step_breadcrumb() {
     local marker="/data/.firstboot-done"
 
     if ! mountpoint -q /data; then
-        log "step 6: mounting /data to write breadcrumb"
+        log "step 7: mounting /data to write breadcrumb"
         mkdir -p /data
         if ! mount /data 2>/dev/null; then
-            warn "step 6: could not mount /data (fstab issue?); skipping breadcrumb"
+            warn "step 7: could not mount /data (fstab issue?); skipping breadcrumb"
             return 0
         fi
     fi
 
     if [[ ! -f "$marker" ]]; then
         date -Iseconds > "$marker" 2>/dev/null || true
-        log "step 6: wrote breadcrumb to ${marker}"
+        log "step 7: wrote breadcrumb to ${marker}"
     else
-        log "step 6: breadcrumb already at ${marker} (firstboot has run on this card before)"
+        log "step 7: breadcrumb already at ${marker} (firstboot has run on this card before)"
     fi
 }
 
@@ -535,6 +610,7 @@ main() {
     step_eeprom_floor
     step_regen_identity
     step_timesyncd
+    step_state_migrate
     step_breadcrumb
     log "done"
     copy_log_to_boot
