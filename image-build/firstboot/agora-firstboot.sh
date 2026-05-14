@@ -118,6 +118,35 @@ step_layout_expand() {
 
     log "step 1: expanding layout on ${diskdev} (root=${root_dev})"
 
+    # Runtime-mask data.mount, the bind mounts, and the auto-generated fsck
+    # unit for the data partition for the entire duration of step_layout_expand.
+    #
+    # Why: on every reflash cycle (and on every udev re-probe triggered by
+    # wipefs / mkfs), systemd-fstab-generator re-emits and re-arms these
+    # units from fstab. They will then race firstboot to fsck and mount P5
+    # the moment the kernel re-publishes its blkid signature, holding the
+    # device busy and causing `mkfs.ext4 data` to fail with EBUSY (observed
+    # in v0.0.3 reflash: "Device or resource busy while setting up superblock").
+    # The bind mounts (var-log, opt-agora-{state,persist}) similarly hold
+    # /data busy via the bind source and prevent its umount.
+    #
+    # --runtime writes the mask symlinks under /run/systemd/system (tmpfs)
+    # so they evaporate on the next boot — perfect: we only need them
+    # silenced for this one firstboot pass. We unmask explicitly at the end
+    # of this step too, so the units are usable later in this same boot.
+    #
+    # The fsck unit name uses systemd's escaped form for "by-partlabel/data"
+    # (the backslash-x2d is an escaped hyphen). Keep the single-quoted form
+    # so bash doesn't try to interpret the backslash.
+    log "step 1: masking data/binds/fsck units to prevent auto-mount race during mkfs"
+    systemctl --runtime mask --now \
+        data.mount \
+        var-log.mount \
+        opt-agora-state.mount \
+        opt-agora-persist.mount \
+        'systemd-fsck@dev-disk-by\x2dpartlabel-data.service' \
+        2>/dev/null || true
+
     # Move the backup GPT table to the end of the actual device. The image's
     # backup GPT sits at the image's tail (~3.6 GB in), not the SD card's
     # tail. Without -e, sgdisk's subsequent --new operations on space past
@@ -242,15 +271,45 @@ step_layout_expand() {
     # Format the three new partitions. -F forces mkfs.ext4 past its
     # "this looks like a partition table" sanity check (a fresh GPT entry
     # has no signature so this is belt-and-suspenders).
-    log "step 1: mkfs.vfat boot-B, mkfs.ext4 root-B, mkfs.ext4 data"
-    if ! mkfs.vfat -F 32 -n boot-B /dev/disk/by-partlabel/boot-B; then
+    #
+    # We address the partitions by raw kernel device path (mmcblk0pN) rather
+    # than the /dev/disk/by-partlabel/<name> symlinks. The symlinks are
+    # owned by udev and only appear after udev has finished probing — and
+    # any access through them re-arms the same generators / auto-mount
+    # path we just masked above. Talking to the block device directly
+    # bypasses that and makes the mkfs sequence fully synchronous.
+    log "step 1: mkfs.vfat boot-B (${diskdev}p3), mkfs.ext4 root-B (${diskdev}p4), mkfs.ext4 data (${diskdev}p5)"
+    if ! mkfs.vfat -F 32 -n boot-B "${diskdev}p3"; then
         err "step 1: mkfs.vfat boot-B failed; continuing"
     fi
-    if ! mkfs.ext4 -F -L root-B /dev/disk/by-partlabel/root-B; then
+    if ! mkfs.ext4 -F -L root-B "${diskdev}p4"; then
         err "step 1: mkfs.ext4 root-B failed; continuing"
     fi
-    if ! mkfs.ext4 -F -F -L data /dev/disk/by-partlabel/data; then
-        err "step 1: mkfs.ext4 data failed; aborting seed"
+
+    # mkfs.ext4 on the data partition is the historical race point. Even
+    # with masked auto-mount, kernel-side BLKRRPART side effects from the
+    # earlier sgdisk + partx + wipefs sequence can leave the device
+    # transiently busy. Retry up to 5 times with a short backoff and a
+    # belt-and-suspenders stop+umount between attempts. This was the v0.0.3
+    # smoking gun: "mkfs.ext4 data: Device or resource busy while setting
+    # up superblock" — which then left /data unformatted, /var/log + the
+    # opt-agora binds inactive, and the player unable to start.
+    local mkfs_ok=0 mkfs_attempt
+    for mkfs_attempt in 1 2 3 4 5; do
+        if mkfs.ext4 -F -F -L data "${diskdev}p5"; then
+            mkfs_ok=1
+            log "step 1: mkfs.ext4 data succeeded on attempt ${mkfs_attempt}/5"
+            break
+        fi
+        warn "step 1: mkfs.ext4 data attempt ${mkfs_attempt}/5 failed; releasing device and retrying"
+        systemctl stop data.mount 2>/dev/null || true
+        umount -l /data 2>/dev/null || true
+        umount -l "${diskdev}p5" 2>/dev/null || true
+        sleep 1
+        udevadm settle 2>/dev/null || true
+    done
+    if (( mkfs_ok == 0 )); then
+        err "step 1: mkfs.ext4 data failed after 5 attempts; aborting seed"
         return 0
     fi
     udevadm settle 2>/dev/null || true
@@ -272,6 +331,20 @@ step_layout_expand() {
     sync
     umount "$seed_mnt"
     rmdir "$seed_mnt" 2>/dev/null || true
+
+    # Unmask the data/bind/fsck units so they can be activated later in this
+    # boot (step_activate_mounts will explicitly start them, and local-fs.target
+    # may also (re-)pull them). daemon-reload picks up the lifted masks and
+    # the fstab regeneration in one shot.
+    log "step 1: unmasking data/bind/fsck units now that mkfs is done"
+    systemctl --runtime unmask \
+        data.mount \
+        var-log.mount \
+        opt-agora-state.mount \
+        opt-agora-persist.mount \
+        'systemd-fsck@dev-disk-by\x2dpartlabel-data.service' \
+        2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
 
     log "step 1: layout expansion complete (root-A=8GB, boot-B/root-B/data created)"
 }
@@ -599,6 +672,37 @@ copy_log_to_boot() {
 }
 
 # ---------------------------------------------------------------------------
+# Step 6.5: explicitly activate /data and the three /data-backed bind mounts
+# before this unit exits, so by the time local-fs.target settles the units
+# are already Active and the player / journald see /var/log on the data
+# partition rather than on the rootfs.
+#
+# Why this exists separately from step_breadcrumb's mountpoint check on /data:
+# step_breadcrumb only proves /data is mounted, not that the binds activated.
+# In v0.0.3 we observed /data mounted but /opt/agora/state, /opt/agora/persist
+# and /var/log all silently inactive (bug os-bug-v003-bind-mounts-never-activate).
+# Root cause was that systemd-fstab-generator does NOT add a
+# RequiresMountsFor=/data ordering dependency to bind mounts whose source is
+# under /data, so they fired in parallel with data.mount at local-fs.target,
+# raced it, failed silently under nofail, and were never retried. v0.0.4 also
+# fixes the root cause in fstab.template by adding x-systemd.requires-mounts-for=/data
+# to each bind entry; this explicit start is the second line of defense and
+# ensures the binds are active before the player and journald start writing.
+# ---------------------------------------------------------------------------
+step_activate_mounts() {
+    log "step 6.5: explicitly activating /data and bind mount units"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl start data.mount 2>/dev/null \
+        || warn "step 6.5: data.mount start failed (already active or missing fstab entry?)"
+    systemctl start var-log.mount 2>/dev/null \
+        || warn "step 6.5: var-log.mount start failed"
+    systemctl start opt-agora-state.mount 2>/dev/null \
+        || warn "step 6.5: opt-agora-state.mount start failed"
+    systemctl start opt-agora-persist.mount 2>/dev/null \
+        || warn "step 6.5: opt-agora-persist.mount start failed"
+}
+
+# ---------------------------------------------------------------------------
 main() {
     log "starting (idempotent, no sentinel-gate per F5)"
     if ! preflight_tools; then
@@ -611,6 +715,7 @@ main() {
     step_regen_identity
     step_timesyncd
     step_state_migrate
+    step_activate_mounts
     step_breadcrumb
     log "done"
     copy_log_to_boot

@@ -31,13 +31,23 @@ PARTLABEL={{BOOT_PARTLABEL}}  /boot/firmware   vfat  defaults,flush,nofail  0  2
 # persistent data
 PARTLABEL=data    /data            ext4  defaults,noatime,nofail  0  2
 
-# /var/log bind-mount → /data/var-log (D56)
-/data/var-log     /var/log         none  bind,nofail  0  0
+# /var/log bind-mount → /data/var-log (D56).
+#
+# x-systemd.requires-mounts-for=/data adds an explicit After=data.mount +
+# Requires=data.mount to the generated mount unit. systemd-fstab-generator
+# does NOT add this automatically for "Type=none" bind mounts whose source
+# is under /data, so without this option the bind unit and data.mount race
+# at local-fs.target activation. On a fresh card where step_layout_expand
+# is still busy creating /data, the bind fires first, fails (silent under
+# nofail), and is never retried — leaving /var/log on the rootfs slot and
+# the binds inactive forever. Same bug applied to /opt/agora/{state,persist}
+# below (bug os-bug-v003-bind-mounts-never-activate).
+/data/var-log     /var/log         none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 
 # /opt/agora/state and /opt/agora/persist bind onto /data so device identity,
 # CMS pairing, provisioning markers and other persistent state survive an
 # A/B slot flip (the slot rootfs is overwritten wholesale per D52/D57).
 # agora-firstboot.sh (step_state_migrate) seeds these from the rootfs on
 # first boot before these binds activate.
-/data/agora/state    /opt/agora/state    none  bind,nofail  0  0
-/data/agora/persist  /opt/agora/persist  none  bind,nofail  0  0
+/data/agora/state    /opt/agora/state    none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
+/data/agora/persist  /opt/agora/persist  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
