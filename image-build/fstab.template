@@ -33,3 +33,11 @@ PARTLABEL=data    /data            ext4  defaults,noatime,nofail  0  2
 
 # /var/log bind-mount → /data/var-log (D56)
 /data/var-log     /var/log         none  bind,nofail  0  0
+
+# /opt/agora/state and /opt/agora/persist bind onto /data so device identity,
+# CMS pairing, provisioning markers and other persistent state survive an
+# A/B slot flip (the slot rootfs is overwritten wholesale per D52/D57).
+# agora-firstboot.sh (step_state_migrate) seeds these from the rootfs on
+# first boot before these binds activate.
+/data/agora/state    /opt/agora/state    none  bind,nofail  0  0
+/data/agora/persist  /opt/agora/persist  none  bind,nofail  0  0

@@ -151,6 +151,15 @@ customize_rootfs() {
     ln -sf /lib/systemd/system/systemd-timesyncd.service \
         "${R}/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service"
 
+    # Disable systemd's hardware-watchdog ownership of /dev/watchdog0 so the
+    # python agora-watchdog.service can hold it instead (bug
+    # os-bug-v002-watchdog-contention). Only ships into root-A here; root-B
+    # is populated by the first OTA bundle per the comment at the top of
+    # this function.
+    install -d -m 0755 "${R}/etc/systemd/system.conf.d"
+    install -m 0644 "${HERE}/system.conf.d/agora.conf" \
+        "${R}/etc/systemd/system.conf.d/agora.conf"
+
     # Signing pubkeys for OTA bundle verification (D54).
     #
     # The real primary + recovery pubkeys are committed in this directory
