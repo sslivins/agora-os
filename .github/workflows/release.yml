@@ -455,11 +455,17 @@ jobs:
           print(open("catalog.json").read())
           PY
 
-      - name: Create draft release
+      - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
-          draft: true
+          # Auto-publish all tags as full releases for now so the agora-cms
+          # Imager UI's `releases/latest/download/catalog.json` consumer
+          # tracks the newest -test build during pre-v1 bring-up.
+          # TODO(post-v1.0.0): flip -test/-rc tags to prerelease so they
+          # don't shadow real semver releases. Sketch:
+          #   prerelease: ${{ contains(github.ref_name, '-') }}
+          draft: false
           generate_release_notes: true
           files: |
             /tmp/agora-build/agora-os-*.img.xz
