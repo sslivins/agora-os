@@ -379,6 +379,82 @@ jobs:
           sha256sum "$(basename "$OUT_IMG_XZ")" > "$(basename "$OUT_IMG_XZ").sha256"
           # The bundle's .sha256 is already emitted by build-bundle.sh.
 
+      - name: Generate catalog.json
+        # Emit the manifest that the agora-cms Imager UI consumes
+        # (shared/services/imager_catalog.py). Schema mirrors the one
+        # sslivins/agora's build-image.yml produces so a single CMS
+        # imager_catalog parser handles both feeds:
+        #
+        #   {
+        #     "schemaVersion": 1,
+        #     "generatedAt": "<utc iso8601>",
+        #     "version": "<tag>",
+        #     "variants": [
+        #       {
+        #         "variant": "pi5",
+        #         "version": "<tag>",
+        #         "filename": "agora-os-<tag>.img.xz",
+        #         "url": "https://github.com/.../releases/download/<tag>/...",
+        #         "sha256": "<hex>",
+        #         "compressedBytes": <int>,
+        #         "uncompressedBytes": <int>
+        #       }
+        #     ]
+        #   }
+        #
+        # agora-os is pi5-only by design (D52/D55), hence the single
+        # variant entry. If we ever add pi4 / zero2w builds, this step
+        # grows additional entries (or graduates to a matrix-fanout +
+        # publish-catalog aggregator job like sslivins/agora has).
+        #
+        # The OTA bundle (.tar.zst) is deliberately NOT in catalog.json
+        # — that artifact is delivered to already-paired devices via
+        # the CMS device-upgrade API, not via the Imager flash-from-SD
+        # flow. Mirroring sslivins/agora's catalog contract.
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd "$(dirname "$OUT_IMG_XZ")"
+          TAG="${GITHUB_REF_NAME}"
+          FILENAME="$(basename "$OUT_IMG_XZ")"
+          SHA256="$(awk '{print $1}' "${FILENAME}.sha256")"
+          COMPRESSED_BYTES="$(stat -c%s "$FILENAME")"
+          # `xz --robot --list` prints a tab-separated table; the row
+          # whose first column is "totals" carries the uncompressed
+          # stream size in column 5. Reading metadata only — no decompress.
+          UNCOMPRESSED_BYTES="$(xz --robot --list "$FILENAME" | awk '$1=="totals"{print $5}')"
+          GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          URL="https://github.com/${REPO}/releases/download/${TAG}/${FILENAME}"
+
+          export TAG FILENAME SHA256 COMPRESSED_BYTES UNCOMPRESSED_BYTES GENERATED_AT URL
+          python3 <<'PY'
+          import json, os
+
+          catalog = {
+              "schemaVersion": 1,
+              "generatedAt": os.environ["GENERATED_AT"],
+              "version": os.environ["TAG"],
+              "variants": [
+                  {
+                      "variant": "pi5",
+                      "version": os.environ["TAG"],
+                      "filename": os.environ["FILENAME"],
+                      "url": os.environ["URL"],
+                      "sha256": os.environ["SHA256"],
+                      "compressedBytes": int(os.environ["COMPRESSED_BYTES"]),
+                      "uncompressedBytes": int(os.environ["UNCOMPRESSED_BYTES"]),
+                  }
+              ],
+          }
+          with open("catalog.json", "w") as f:
+              json.dump(catalog, f, indent=2, sort_keys=True)
+              f.write("\n")
+          print("--- catalog.json ---")
+          print(open("catalog.json").read())
+          PY
+
       - name: Create draft release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
@@ -392,3 +468,4 @@ jobs:
             /tmp/agora-build/agora-bundle-*.tar.zst
             /tmp/agora-build/agora-bundle-*.tar.zst.minisig
             /tmp/agora-build/agora-bundle-*.tar.zst.sha256
+            /tmp/agora-build/catalog.json
