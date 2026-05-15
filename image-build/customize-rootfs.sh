@@ -66,6 +66,15 @@ echo "customize-rootfs: applying to ${R} (boot=${B})..."
 install -m 0644 "${HERE}/logrotate-agora.conf" \
     "${R}/etc/logrotate.d/agora"
 
+# Persistent journald storage. Without this, journald defaults to
+# volatile (in-memory) because /var/log/journal/ does not exist, and
+# `journalctl -b -1` after a reboot returns "no persistent journal was
+# found" — making it impossible to investigate the previous boot
+# (e.g. a failed tryboot or a slot-mgr promote/revert decision). See
+# journald-persistent.conf for the full rationale.
+install -D -m 0644 "${HERE}/journald-persistent.conf" \
+    "${R}/etc/systemd/journald.conf.d/agora-persistent.conf"
+
 # /var/log bind-mount target (D56). fstab.template points at it.
 mkdir -p "${R}/var/log"
 

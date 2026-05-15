@@ -136,6 +136,24 @@ findmnt /var/log
 (`grep var-log /etc/fstab` on slot A, then mount slot B read-only and
 check there too).
 
+### A6b. journald uses persistent storage
+
+```sh
+journalctl --no-pager --header | grep -i 'storage\|file'
+ls -ld /var/log/journal/$(cat /etc/machine-id)
+sudo reboot
+# wait, ssh back in
+journalctl -b -1 -n 5
+```
+
+After the second boot, `journalctl -b -1` must return real log lines
+from the previous boot — NOT `Specifying boot ID or boot offset has
+no effect, no persistent journal was found`. The
+`/var/log/journal/<machine-id>/` directory is auto-created by
+journald on first start because the shipped drop-in at
+`/etc/systemd/journald.conf.d/agora-persistent.conf` sets
+`Storage=persistent`.
+
 ### A7. Per-device identity files are fresh (F11)
 
 ```sh
