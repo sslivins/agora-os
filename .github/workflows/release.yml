@@ -323,9 +323,17 @@ jobs:
           AGORA_OS_VERSION="${GITHUB_REF_NAME#v}"
           AGORA_OS_VERSION="${AGORA_OS_VERSION:-dev}"
           AGORA_APP_FLOOR="$(cat image-build/agora-app-floor.txt)"
+          # min-from-version.txt is the single source of truth for the
+          # floor a device must be on to accept this bundle. CMS reads
+          # the same value out of the meta.json sidecar at dispatch
+          # time. Default 0.0.0 = no floor (every shipped version is
+          # eligible); bump when a release requires devices to hop
+          # through an intermediate version first.
+          MIN_FROM_VERSION="$(cat image-build/min-from-version.txt)"
           sudo \
             AGORA_OS_VERSION="$AGORA_OS_VERSION" \
             AGORA_APP_FLOOR="$AGORA_APP_FLOOR" \
+            MIN_FROM_VERSION="$MIN_FROM_VERSION" \
             image-build/build-bundle.sh \
             /tmp/agora-build/rootfs.tar \
             /tmp/agora-build/boot.tar \
@@ -497,4 +505,5 @@ jobs:
             /tmp/agora-build/agora-bundle-*.tar.zst
             /tmp/agora-build/agora-bundle-*.tar.zst.minisig
             /tmp/agora-build/agora-bundle-*.tar.zst.sha256
+            /tmp/agora-build/agora-bundle-*.meta.json
             /tmp/agora-build/catalog.json
