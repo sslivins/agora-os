@@ -144,6 +144,7 @@ step_layout_expand() {
         var-log.mount \
         opt-agora-state.mount \
         opt-agora-persist.mount \
+        opt-agora-assets.mount \
         'systemd-fsck@dev-disk-by\x2dpartlabel-data.service' \
         2>/dev/null || true
 
@@ -326,8 +327,8 @@ step_layout_expand() {
         return 0
     fi
     echo 1 > "${seed_mnt}/SCHEMA_VERSION"
-    mkdir -p "${seed_mnt}/var-log" "${seed_mnt}/agora" "${seed_mnt}/agora/state" "${seed_mnt}/agora/persist"
-    chmod 0755 "${seed_mnt}/var-log" "${seed_mnt}/agora" "${seed_mnt}/agora/state" "${seed_mnt}/agora/persist"
+    mkdir -p "${seed_mnt}/var-log" "${seed_mnt}/agora" "${seed_mnt}/agora/state" "${seed_mnt}/agora/persist" "${seed_mnt}/agora/assets"
+    chmod 0755 "${seed_mnt}/var-log" "${seed_mnt}/agora" "${seed_mnt}/agora/state" "${seed_mnt}/agora/persist" "${seed_mnt}/agora/assets"
     sync
     umount "$seed_mnt"
     rmdir "$seed_mnt" 2>/dev/null || true
@@ -342,6 +343,7 @@ step_layout_expand() {
         var-log.mount \
         opt-agora-state.mount \
         opt-agora-persist.mount \
+        opt-agora-assets.mount \
         'systemd-fsck@dev-disk-by\x2dpartlabel-data.service' \
         2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
@@ -549,18 +551,25 @@ step_timesyncd() {
 #
 # We mount /data manually here (after step 1 created and step 2 grew it).
 # ---------------------------------------------------------------------------
-# Step 6: seed /data with /opt/agora/state and /opt/agora/persist content
-# (bug os-bug-v002-state-on-rootfs).
+# Step 6: seed /data with /opt/agora/{state,persist,assets} content
+# (bug os-bug-v002-state-on-rootfs + missing-assets-bind follow-up).
 #
-# fstab on a v0.0.3+ image bind-mounts /data/agora/state -> /opt/agora/state
-# and /data/agora/persist -> /opt/agora/persist so device identity, CMS
-# pairing, the provisioned marker etc. survive an A/B slot flip. But on a
-# fresh card those /data/agora/{state,persist} directories are empty seed
-# dirs (step 1 created them but didn't populate them), and the rootfs slot
-# carries any seed content shipped with the image plus anything written by
-# package post-install scripts on first boot. We copy that into /data BEFORE
-# local-fs.target activates the bind mounts. After the binds activate the
-# rootfs dirs are masked and any further writes go to /data.
+# fstab on a v0.0.20+ image bind-mounts /data/agora/state -> /opt/agora/state,
+# /data/agora/persist -> /opt/agora/persist, and /data/agora/assets ->
+# /opt/agora/assets so device identity, CMS pairing, the provisioned marker,
+# and CMS-pushed asset content (videos, images, slideshows) all survive an
+# A/B slot flip AND live on the spacious /data partition instead of the
+# 8 GB rootfs slot. Without the assets bind, the CMS Storage widget reads
+# the rootfs slot geometry (8 GB) instead of /data (~12.7 GB on a 32 GB
+# card) and a busy site can exhaust the rootfs partition long before /data
+# fills.
+#
+# On a fresh card those /data/agora/{state,persist,assets} directories are
+# empty seed dirs (step 1 created them but didn't populate them), and the
+# rootfs slot carries any seed content shipped with the image plus anything
+# written by package post-install scripts on first boot. We copy that into
+# /data BEFORE local-fs.target activates the bind mounts. After the binds
+# activate the rootfs dirs are masked and any further writes go to /data.
 #
 # Sentinel /data/.state-migrated makes this one-shot per card. We also
 # short-circuit if the dirs are already mountpoints (shouldn't happen during
@@ -584,14 +593,14 @@ step_state_migrate() {
         return 0
     fi
 
-    if mountpoint -q /opt/agora/state || mountpoint -q /opt/agora/persist; then
-        log "step 6: /opt/agora/{state,persist} already a mountpoint; binds active before migration ran, just stamping sentinel"
+    if mountpoint -q /opt/agora/state || mountpoint -q /opt/agora/persist || mountpoint -q /opt/agora/assets; then
+        log "step 6: /opt/agora/{state,persist,assets} already a mountpoint; binds active before migration ran, just stamping sentinel"
         touch "$sentinel" 2>/dev/null || true
         return 0
     fi
 
-    mkdir -p /data/agora/state /data/agora/persist
-    chmod 0755 /data/agora/state /data/agora/persist
+    mkdir -p /data/agora/state /data/agora/persist /data/agora/assets
+    chmod 0755 /data/agora/state /data/agora/persist /data/agora/assets
 
     if [[ -d /opt/agora/state ]]; then
         log "step 6: copying /opt/agora/state -> /data/agora/state"
@@ -607,6 +616,14 @@ step_state_migrate() {
             warn "step 6: cp /opt/agora/persist -> /data/agora/persist returned non-zero; continuing"
     else
         log "step 6: /opt/agora/persist not present in rootfs; skipping copy (just creating /data target)"
+    fi
+
+    if [[ -d /opt/agora/assets ]]; then
+        log "step 6: copying /opt/agora/assets -> /data/agora/assets"
+        cp -a /opt/agora/assets/. /data/agora/assets/ 2>/dev/null || \
+            warn "step 6: cp /opt/agora/assets -> /data/agora/assets returned non-zero; continuing"
+    else
+        log "step 6: /opt/agora/assets not present in rootfs; skipping copy (just creating /data target)"
     fi
 
     sync
@@ -700,6 +717,8 @@ step_activate_mounts() {
         || warn "step 6.5: opt-agora-state.mount start failed"
     systemctl start opt-agora-persist.mount 2>/dev/null \
         || warn "step 6.5: opt-agora-persist.mount start failed"
+    systemctl start opt-agora-assets.mount 2>/dev/null \
+        || warn "step 6.5: opt-agora-assets.mount start failed"
 }
 
 # ---------------------------------------------------------------------------
