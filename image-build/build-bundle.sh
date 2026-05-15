@@ -305,4 +305,25 @@ echo "build-bundle: ${OUT_BUNDLE} (${OUT_SIZE} bytes)"
     sha256sum "$(basename "$OUT_BUNDLE")" > "$(basename "$OUT_BUNDLE").sha256"
 )
 
+# ---------------------------------------------------------------------------
+# Step 7: emit meta.json as a sibling release asset.
+#
+# The canonical meta.json lives inside the bundle tarball — that's the
+# copy the device-side verifier consumes after decompression. But CMS
+# needs to read min_from_version + target_version + sha256 to decide
+# whether to dispatch this release to a given device, and doing that
+# from the bundle requires either downloading the full ~1 GB tarball
+# or doing a streaming partial-extract dance. Both are bad.
+#
+# Solution: write a byte-identical copy of meta.json next to the
+# bundle so release.yml can upload it as a sibling release asset. CMS
+# fetches just this small JSON via the GitHub Releases API per poll
+# cycle (~few KB) and reads min_from_version / sha256 / etc. directly.
+# Naming pattern matches the bundle so versioned releases don't
+# collide: agora-bundle-vX.Y.Z.tar.zst pairs with agora-bundle-vX.Y.Z.meta.json.
+# ---------------------------------------------------------------------------
+OUT_META="${OUT_BUNDLE%.tar.zst}.meta.json"
+cp "${WORK}/bundle/meta.json" "$OUT_META"
+echo "build-bundle: meta.json sidecar emitted at ${OUT_META}"
+
 echo "build-bundle: done."
