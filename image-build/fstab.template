@@ -44,10 +44,19 @@ PARTLABEL=data    /data            ext4  defaults,noatime,nofail  0  2
 # below (bug os-bug-v003-bind-mounts-never-activate).
 /data/var-log     /var/log         none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 
-# /opt/agora/state and /opt/agora/persist bind onto /data so device identity,
-# CMS pairing, provisioning markers and other persistent state survive an
-# A/B slot flip (the slot rootfs is overwritten wholesale per D52/D57).
+# /opt/agora/{state,persist,assets} bind onto /data so device identity,
+# CMS pairing, provisioning markers, and CMS-pushed asset content (videos,
+# images, slideshows) all live on the persistent data partition and survive
+# an A/B slot flip (the slot rootfs is overwritten wholesale per D52/D57).
+#
+# Without the assets bind, /opt/agora/assets ends up on the 8 GB rootfs slot
+# even though /data is sized to fill the SD (~12.7 GB on a 32 GB card). The
+# CMS Storage widget reads `shutil.disk_usage("/opt/agora/assets")` and would
+# report the rootfs slot's geometry instead of /data, and a busy site can
+# exhaust the rootfs partition long before /data fills.
+#
 # agora-firstboot.sh (step_state_migrate) seeds these from the rootfs on
 # first boot before these binds activate.
 /data/agora/state    /opt/agora/state    none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
 /data/agora/persist  /opt/agora/persist  none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
+/data/agora/assets   /opt/agora/assets   none  bind,nofail,x-systemd.requires-mounts-for=/data  0  0
