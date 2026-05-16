@@ -4,8 +4,9 @@
 #   1. Checkout this repo on a GitHub-hosted arm64 runner (D55: no qemu).
 #   2. Clone pi-gen at a pinned SHA, drop our stage-agora overlay into it.
 #   3. Run pi-gen via build-docker.sh to build a stock Bookworm arm64
-#      rootfs (the overlay is a no-op placeholder today -- TODO
-#      p0-pi-gen-overlay-followup).
+#      rootfs with our stage-agora overlay (Chromium-HEVC, agora app,
+#      base tooling -- minisign, gdisk, parted, dosfstools, e2fsprogs,
+#      rpi-eeprom, zstd -- via the 00-base-packages substage).
 #   4. Split pi-gen's output .img into boot + rootfs tarballs.
 #   5. Run image-build/assemble.sh to lay out the 5-partition GPT image
 #      with both root slots, EEPROM templates, and dual pubkeys.
