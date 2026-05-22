@@ -88,6 +88,60 @@ done
 # can't restore the broken 6.18 kernel.
 apt-mark hold linux-image-rpi-2712 linux-image-6.12.75+rpt-rpi-2712
 
+# ─── Defensive: explicitly stamp the boot artifacts ───────────────────────
+# The raspi-firmware z50 postinst.d hook copies vmlinuz → /boot/firmware/
+# kernel_2712.img on install, but the postrm.d hook from the *purged* 6.18
+# kernel runs AFTER our install and rewrites kernel_2712.img to whatever
+# vmlinuz it finds next (in our case it picked the still-installed
+# 6.18.29+rpt-rpi-v8 generic kernel, which is the wrong binary for Pi5).
+# Empirically this leaves the device running 6.18 even though dpkg
+# reports 6.12.75 as the only +rpt-rpi-2712 kernel.
+#
+# So do the copy ourselves AFTER all dpkg work, and verify by sha256.
+PIN_VERSION="6.12.75+rpt-rpi-2712"
+PIN_VMLINUZ="/boot/vmlinuz-${PIN_VERSION}"
+if [ ! -f "${PIN_VMLINUZ}" ]; then
+    echo "Agora: FATAL - ${PIN_VMLINUZ} missing after dpkg install" >&2
+    exit 1
+fi
+
+# Ensure initramfs exists for 6.12 (raspi-firmware hook needs it for
+# /boot/firmware/initramfs_2712).
+update-initramfs -c -k "${PIN_VERSION}" 2>/dev/null \
+    || update-initramfs -u -k "${PIN_VERSION}"
+
+# Stamp the Pi5 boot kernel + initramfs.
+mkdir -p /boot/firmware
+cp -f "${PIN_VMLINUZ}" /boot/firmware/kernel_2712.img
+if [ -f "/boot/initrd.img-${PIN_VERSION}" ]; then
+    cp -f "/boot/initrd.img-${PIN_VERSION}" /boot/firmware/initramfs_2712
+else
+    echo "Agora: WARNING - /boot/initrd.img-${PIN_VERSION} missing; not updating initramfs_2712" >&2
+fi
+
+# Stamp Pi5 dtbs + overlays (they ship under /usr/lib/linux-image-<ver>/).
+KERN_LIB="/usr/lib/linux-image-${PIN_VERSION}"
+if [ -d "${KERN_LIB}/broadcom" ]; then
+    # Pi5-family dtbs: bcm2712-*.dtb
+    for dtb in ${KERN_LIB}/broadcom/bcm2712-*.dtb; do
+        [ -f "$dtb" ] && cp -f "$dtb" /boot/firmware/
+    done
+fi
+if [ -d "${KERN_LIB}/overlays" ]; then
+    mkdir -p /boot/firmware/overlays
+    cp -f ${KERN_LIB}/overlays/*.dtbo /boot/firmware/overlays/ 2>/dev/null || true
+    [ -f ${KERN_LIB}/overlays/README ] && cp -f ${KERN_LIB}/overlays/README /boot/firmware/overlays/ || true
+fi
+
+# Verify kernel_2712.img is exactly the 6.12.75 binary.
+SRC_SHA=$(sha256sum "${PIN_VMLINUZ}" | awk '{print $1}')
+DST_SHA=$(sha256sum /boot/firmware/kernel_2712.img | awk '{print $1}')
+if [ "${SRC_SHA}" != "${DST_SHA}" ]; then
+    echo "Agora: FATAL - kernel_2712.img sha (${DST_SHA}) != vmlinuz-${PIN_VERSION} sha (${SRC_SHA})" >&2
+    exit 1
+fi
+echo "Agora: kernel_2712.img verified as 6.12.75 (sha ${DST_SHA})"
+
 rm -rf /var/tmp/kernel-612
 CHEOF
 
