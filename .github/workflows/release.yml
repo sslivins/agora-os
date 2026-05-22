@@ -67,6 +67,31 @@ jobs:
       - name: Checkout agora-os
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
+      - name: Validate tag format
+        # Fail fast on malformed tags (e.g. `v0.0.40-test-k612` USED to pass
+        # this gate but blow up on the Pi side because the on-device updater
+        # regex was stricter; both have been aligned, but we still want a
+        # cheap up-front rejection of obviously-wrong tags before burning a
+        # ~2h pi-gen build).
+        #
+        # Accept:  v<major>.<minor>.<patch>[-<prerelease>][+<build>]
+        # Prerelease + build allow [0-9A-Za-z.-].
+        # Examples that pass: v1.2.3 / v1.2.3-test / v0.0.40-test-k612 /
+        #                     v1.2.3-rc.1 / v1.2.3+ci.123
+        # Examples that fail: 1.2.3 (missing v) / v1.2 (missing patch) /
+        #                     v1.2.3.4 / v1.2.3_test (underscore)
+        if: github.event_name == 'push'
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag '${tag}' is not a valid agora-os release tag."
+            echo "Expected: v<major>.<minor>.<patch>[-<prerelease>][+<build>]"
+            echo "Got:      ${tag}"
+            exit 1
+          fi
+          echo "Tag '${tag}' OK"
+
       - name: Free disk space on runner
         # pi-gen's debootstrap + Docker layers can balloon past the
         # ~30 GB of free space ubuntu-24.04-arm ships with -- run #25821558614
