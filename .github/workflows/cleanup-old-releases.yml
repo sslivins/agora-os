@@ -46,19 +46,30 @@ jobs:
           echo "Dry run: ${DRY_RUN}"
           echo
 
-          # Fetch up to 200 releases sorted newest first.  GH returns
-          # them in createdAt-desc order by default.
+          # Fetch all releases.  We deliberately ignore the
+          # ``prerelease`` flag because the agora-os release.yml does
+          # NOT mark ``-rc`` / ``-test`` tags as prereleases — they
+          # all come through as regular releases.  Instead we
+          # classify by tag suffix: anything matching ``vX.Y.Z`` with
+          # no suffix is "stable", anything with a ``-anything``
+          # suffix is "prerelease".  This matches semver and how
+          # the user actually treats them.
+          #
+          # We also sort by created_at descending in jq because the
+          # API's default ordering isn't reliable across pages.
           releases_json=$(gh api -X GET "repos/${REPO}/releases" \
             -F per_page=100 --paginate \
-            --jq '[.[] | {tag: .tag_name, id: .id, draft: .draft, prerelease: .prerelease, created: .created_at}]')
+            --jq '[.[] | {tag: .tag_name, id: .id, draft: .draft, created: .created_at}] | sort_by(.created) | reverse')
 
           # Drop drafts entirely — they're work-in-progress, leave alone.
+          # ``is_stable``: tag matches ``vDIGITS.DIGITS.DIGITS`` and
+          # nothing after.  Anything else (rc/test/pre/etc.) is a prerelease.
           stable_keep=$(echo "$releases_json" | jq -r \
             --argjson n "$KEEP_STABLE" \
-            '[.[] | select(.draft == false and .prerelease == false)][:$n] | .[].tag')
+            '[.[] | select(.draft == false) | select(.tag | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))][:$n] | .[].tag')
           pre_keep=$(echo "$releases_json" | jq -r \
             --argjson n "$KEEP_PRERELEASE" \
-            '[.[] | select(.draft == false and .prerelease == true)][:$n] | .[].tag')
+            '[.[] | select(.draft == false) | select(.tag | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$") | not)][:$n] | .[].tag')
 
           echo "=== Keeping stable ==="
           echo "$stable_keep" | sed 's/^/  - /' || echo "  (none)"
