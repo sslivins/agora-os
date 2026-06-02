@@ -1,0 +1,101 @@
+name: cleanup-old-releases
+
+# Retention policy for agora-os GitHub releases:
+#   * keep the latest 2 stable (non-prerelease, non-draft) releases
+#   * keep the latest 3 prereleases
+#   * delete everything else AND their underlying git tags
+#
+# Without this, every test rebake (-test, -rc) plus every prod bump
+# accumulates indefinitely — the .img.xz assets are ~1.5 GB each
+# and the release list becomes unscannable.  The CMS bundle_checker
+# only ever looks at the newest non-draft release including
+# prereleases, so older entries serve no operational purpose.
+#
+# Runs weekly (Sunday 09:00 UTC) and on-demand via workflow_dispatch.
+# Honors a dry-run input so you can preview the deletion list
+# before actually pruning.
+
+on:
+  schedule:
+    - cron: "0 9 * * 0"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "If true, log what would be deleted but don't delete."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # release + tag delete
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune old releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          KEEP_STABLE: "2"
+          KEEP_PRERELEASE: "3"
+        run: |
+          set -euo pipefail
+
+          echo "Retention: keep ${KEEP_STABLE} stable + ${KEEP_PRERELEASE} prereleases"
+          echo "Dry run: ${DRY_RUN}"
+          echo
+
+          # Fetch up to 200 releases sorted newest first.  GH returns
+          # them in createdAt-desc order by default.
+          releases_json=$(gh api -X GET "repos/${REPO}/releases" \
+            -F per_page=100 --paginate \
+            --jq '[.[] | {tag: .tag_name, id: .id, draft: .draft, prerelease: .prerelease, created: .created_at}]')
+
+          # Drop drafts entirely — they're work-in-progress, leave alone.
+          stable_keep=$(echo "$releases_json" | jq -r \
+            --argjson n "$KEEP_STABLE" \
+            '[.[] | select(.draft == false and .prerelease == false)][:$n] | .[].tag')
+          pre_keep=$(echo "$releases_json" | jq -r \
+            --argjson n "$KEEP_PRERELEASE" \
+            '[.[] | select(.draft == false and .prerelease == true)][:$n] | .[].tag')
+
+          echo "=== Keeping stable ==="
+          echo "$stable_keep" | sed 's/^/  - /' || echo "  (none)"
+          echo "=== Keeping prereleases ==="
+          echo "$pre_keep" | sed 's/^/  - /' || echo "  (none)"
+          echo
+
+          # Build the "delete me" list: everything non-draft NOT in
+          # either keep list.
+          keep_tags=$(printf "%s\n%s\n" "$stable_keep" "$pre_keep" | sort -u)
+          delete_tags=$(echo "$releases_json" | jq -r \
+            '.[] | select(.draft == false) | .tag' \
+            | grep -vxF -f <(echo "$keep_tags") || true)
+
+          if [ -z "${delete_tags}" ]; then
+            echo "Nothing to delete."
+            exit 0
+          fi
+
+          echo "=== Deleting ==="
+          echo "$delete_tags" | sed 's/^/  - /'
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo
+            echo "DRY RUN — not actually deleting."
+            exit 0
+          fi
+
+          # --cleanup-tag also deletes the underlying git tag, which
+          # is what we want — orphaned tags pinning old SHAs are
+          # exactly the noise we're trying to remove.
+          echo "$delete_tags" | while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Deleting $tag..."
+            gh release delete "$tag" --repo "${REPO}" --cleanup-tag --yes \
+              || echo "  WARN: failed to delete $tag (continuing)"
+          done
+
+          echo
+          echo "Cleanup complete."
