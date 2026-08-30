@@ -516,12 +516,13 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
-          # Auto-publish all tags as full releases for now so the agora-cms
-          # Imager UI's `releases/latest/download/catalog.json` consumer
-          # tracks the newest -test build during pre-v1 bring-up.
-          # TODO(post-v1.0.0): flip -test/-rc tags to prerelease so they
-          # don't shadow real semver releases. Sketch:
-          #   prerelease: ${{ contains(github.ref_name, '-') }}
+          # Channel signal for the agora-cms prerelease opt-in feature:
+          # a plain `vX.Y.Z` tag publishes a STABLE GitHub release, while
+          # any pre-release suffix (`vX.Y.Z-test` / `-rc.N`) publishes a
+          # GitHub *prerelease*. agora-cms bundle_checker keys its
+          # stable/prerelease channels off this boolean, so devices on the
+          # default `stable` channel only ever see plain semver releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           draft: false
           generate_release_notes: true
           files: |
